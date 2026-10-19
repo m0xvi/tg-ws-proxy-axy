@@ -285,6 +285,10 @@ impl WsPool {
             }
         }
 
+        if self.cancel_token.is_cancelled() {
+            return;
+        }
+
         if connected > 0 {
             self.report_success(slot.dc, slot.is_media != 0).await;
             self.schedule_rotation(slot, target_ip, domains).await;
@@ -1337,42 +1341,52 @@ async fn cfproxy_acquire_ws(
     let mut ws: Option<RawWebSocket> = None;
     let mut chosen_domain = String::new();
 
-    if !ordered.is_empty() && !ordered[0].is_empty() {
-        let (w, d) = try_cfproxy_base_domain(dc, &ordered[0], ws_path).await;
-        ws = w;
-        chosen_domain = d;
-    }
+    // Пробуем до 6 доменов параллельно через mpsc-канал: первый же подключившийся
+    // домен возвращается мгновенно (без ожидания остальных по порядку!).
+    let candidate_domains: Vec<String> = ordered
+        .into_iter()
+        .filter(|d| !d.is_empty())
+        .take(6)
+        .collect();
 
-    if ws.is_none() && ordered.len() > 1 {
-        let remaining_domains: Vec<String> = ordered[1..].to_vec();
+    if !candidate_domains.is_empty() {
         let sem = Arc::new(tokio::sync::Semaphore::new(CFPROXY_FALLBACK_PARALLEL));
-        let mut handles = Vec::new();
-        for bd in remaining_domains {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(candidate_domains.len());
+        let mut handles = Vec::with_capacity(candidate_domains.len());
+
+        for (idx, bd) in candidate_domains.into_iter().enumerate() {
             let sem = sem.clone();
             let cancel = cancel_token.clone();
             let ws_path = ws_path.to_string();
+            let tx = tx.clone();
             handles.push(tokio::spawn(async move {
-                tokio::select! {
+                // Первому (активному) домену даём фору 80мс, остальные стартуют следом
+                if idx > 0 {
+                    tokio::time::sleep(Duration::from_millis((idx as u64) * 80)).await;
+                }
+                let res = tokio::select! {
                     _ = cancel.cancelled() => None,
                     r = async {
                         let _p = sem.acquire().await.ok()?;
                         let (w, d) = try_cfproxy_base_domain(dc, &bd, &ws_path).await;
                         w.map(|ws| (ws, d))
                     } => r,
-                }
+                };
+                let _ = tx.send(res).await;
             }));
         }
-        for h in handles {
-            if let Ok(Some((w, d))) = h.await {
-                if ws.is_none() {
-                    ws = Some(w);
-                    chosen_domain = d;
-                } else {
-                    tokio::spawn(async move {
-                        w.close().await;
-                    });
-                }
+        drop(tx);
+
+        while let Some(msg) = rx.recv().await {
+            if let Some((w, d)) = msg {
+                ws = Some(w);
+                chosen_domain = d;
+                break;
             }
+        }
+
+        for h in handles {
+            h.abort();
         }
     }
 
@@ -2326,6 +2340,11 @@ pub async fn run_proxy(
 
 pub fn parse_cidr_pool(cidrs_str: &str) -> HashMap<i32, String> {
     let mut result = HashMap::new();
+    // Всегда заполняем базовые прямые WS IP для DC 1..5 (чтобы пул прямых WS-соединений
+    // с SNI-fronting и DPI-фрагментацией работал даже при пустом dc_ips из UI).
+    for (&dc, &ip) in DEFAULT_WS_DC_IPS.iter() {
+        result.insert(dc, ip.to_string());
+    }
     if cidrs_str.trim().is_empty() {
         return result;
     }

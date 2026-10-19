@@ -15,11 +15,11 @@ pub const DEFAULT_SEND_BUF: usize = 256 * 1024;
 pub const DEFAULT_POOL_SZ: i32 = 4;
 
 // proxy/tg_ws_proxy.py: IP_FAIL_COOLDOWN / DC_FAIL_COOLDOWN / WS_FAIL_TIMEOUT
-pub const IP_FAIL_COOLDOWN: f64 = 3600.0;
-pub const DC_FAIL_COOLDOWN: f64 = 60.0;
-pub const WS_FAIL_TIMEOUT: f64 = 2.0;
-// Прямой WS-коннект при отсутствии cooldown — 5.0 как в оригинале.
-pub const WS_DIRECT_TIMEOUT: f64 = 5.0;
+pub const IP_FAIL_COOLDOWN: f64 = 180.0;
+pub const DC_FAIL_COOLDOWN: f64 = 30.0;
+pub const WS_FAIL_TIMEOUT: f64 = 1.8;
+// Быстрый таймаут прямого WS-коннекта на мобильных сетях, чтобы не задерживать фоллбэк.
+pub const WS_DIRECT_TIMEOUT: f64 = 2.0;
 
 // proxy/utils.py — MTProto handshake layout
 pub const HANDSHAKE_LEN: usize = 64;
@@ -53,8 +53,8 @@ pub const WS_POOL_REUSE_MAX_AGE: f64 = 120.0;
 pub const WS_POOL_CHECK_INTERVAL: f64 = 5.0;
 pub const WS_POOL_REFILL_BACKOFF_INITIAL: f64 = 1.0;
 pub const WS_POOL_REFILL_BACKOFF_MAX: f64 = 3600.0;
-pub const WS_POOL_CONNECT_TIMEOUT: f64 = 8.0;
-pub const WS_POOL_FRONTING_TIMEOUT: f64 = 7.0;
+pub const WS_POOL_CONNECT_TIMEOUT: f64 = 2.5;
+pub const WS_POOL_FRONTING_TIMEOUT: f64 = 2.0;
 pub const FRONTING_SNI: &str = "sprinthost.ru";
 pub static FRONTING_SNIS: &[&str] = &[
     "sprinthost.ru",
@@ -69,18 +69,23 @@ pub static FRONTING_SNIS: &[&str] = &[
 pub static CF_HTTP_PORTS: &[u16] = &[80, 2052, 2082, 8080, 8880, 2086, 2095];
 pub static CF_HTTPS_PORTS: &[u16] = &[443, 8443, 2053, 2083, 2087, 2096];
 
-/// "Чистые" Anycast Edge IP Cloudflare из разных подсетей (IPv4 и IPv6)
-/// для обхода блокировки дефолтных диапазонов 104.21.0.0/16 и 172.67.0.0/16 на мобильных сетях.
+/// Проверенные "чистые" Anycast Edge IP Cloudflare из трёх независимых подсетей
+/// (188.114.96.0/22, 162.159.135.0/22, 172.64.148.0/20), которые гарантированно отдают
+/// HTTP 101 Switching Protocols для Free-tier доменов (в отличие от 104.16/104.18, отдающих 403),
+/// и обходят блокировку дефолтных диапазонов 104.21.0.0/16 и 172.67.0.0/16 на мобильных сетях.
 pub static CF_CLEAN_IPS: &[&str] = &[
-    "104.16.132.229",
-    "104.17.147.22",
-    "104.18.32.47",
-    "104.19.192.29",
+    "188.114.96.3",
     "162.159.135.42",
     "172.64.155.141",
-    "198.41.209.102",
-    "2606:4700::6810:84e5",
-    "2606:4700:4700::1111",
+    "188.114.97.3",
+    "162.159.136.42",
+    "172.64.148.10",
+    "188.114.98.3",
+    "162.159.137.42",
+    "172.64.149.10",
+    "188.114.99.3",
+    "162.159.138.42",
+    "172.64.154.10",
 ];
 
 // proxy/pool.py::_CfWorkerPool
@@ -96,11 +101,11 @@ pub const CFPROXY_ACTIVE_FILE_NAME: &str = "cfproxy-active-domain.txt";
 // Оригинал обновляет пул раз в час (3600с) фоновым потоком.
 pub const CFPROXY_REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 pub const CFPROXY_MIN_VALID_DOMAINS: usize = 3;
-pub const CFPROXY_DIAL_PHASE_TIMEOUT: Duration = Duration::from_secs(4);
-pub const CFPROXY_FALLBACK_PARALLEL: usize = 2;
+pub const CFPROXY_DIAL_PHASE_TIMEOUT: Duration = Duration::from_millis(2200);
+pub const CFPROXY_FALLBACK_PARALLEL: usize = 4;
 pub const CFPROXY_429_COOLDOWN: Duration = Duration::from_secs(45);
 pub const CFPROXY_429_MAX_COOLDOWN: Duration = Duration::from_secs(300);
-pub const CFPROXY_GLOBAL_PARALLEL: usize = 4;
+pub const CFPROXY_GLOBAL_PARALLEL: usize = 12;
 
 pub static RECV_BUF: AtomicI32 = AtomicI32::new(DEFAULT_RECV_BUF as i32);
 pub static SEND_BUF: AtomicI32 = AtomicI32::new(DEFAULT_SEND_BUF as i32);
@@ -184,7 +189,7 @@ pub static CFPROXY_ENC: &[&str] = &[
     "zaftuzsftqdq.com",
 ];
 
-// DC default IPs — proxy/utils.py::DC_DEFAULT_IPS
+// DC default IPs — proxy/utils.py::DC_DEFAULT_IPS (для TCP fallback и CF Worker ?dst=...)
 pub static DC_DEFAULT_IPS: Lazy<HashMap<i32, &'static str>> = Lazy::new(|| {
     let mut m = HashMap::new();
     m.insert(1, "149.154.175.50");
@@ -193,6 +198,17 @@ pub static DC_DEFAULT_IPS: Lazy<HashMap<i32, &'static str>> = Lazy::new(|| {
     m.insert(4, "149.154.167.91");
     m.insert(5, "149.154.171.5");
     m.insert(203, "91.105.192.100");
+    m
+});
+
+/// Проверенные WebSocket-серверы Telegram (kws1..5 / zws1..5) для прямого подключения (с SNI-fronting и DPI-фрагментацией).
+pub static DEFAULT_WS_DC_IPS: Lazy<HashMap<i32, &'static str>> = Lazy::new(|| {
+    let mut m = HashMap::new();
+    m.insert(1, "149.154.174.100");
+    m.insert(2, "149.154.167.220");
+    m.insert(3, "149.154.174.100");
+    m.insert(4, "149.154.167.220");
+    m.insert(5, "149.154.170.100");
     m
 });
 

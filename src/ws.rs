@@ -870,22 +870,17 @@ async fn handshake_plain(
 
     let write_res = tokio::time::timeout(timeout, async {
         if DPI_FRAGMENTATION.load(Ordering::Relaxed) && domain.len() >= 4 {
-            // DPI-обход на HTTP (порт 80/2052/8080):
-            // 1) mixed-case "hOsT:" (RFC 7230 §3.2 регистронезависим, но сбивает сигнатуры ТСПУ)
-            // 2) TCP-сегментация посреди метода GET и посреди имени домена в заголовке Host
+            // TCP-сегментация посреди имени домена в заголовке Host (совместимо с прозрачными прокси операторов)
             let mid = domain.len() / 2;
-            let seg1 = b"GET ";
-            let seg2 = format!("{} HTTP/1.1\r\nhOsT: {}", path, &domain[..mid]);
-            let seg3 = format!(
+            let seg1 = format!("GET {} HTTP/1.1\r\nHost: {}", path, &domain[..mid]);
+            let seg2 = format!(
                 "{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n",
                 &domain[mid..],
                 ws_key
             );
-            write_half.write_all(seg1).await?;
+            write_half.write_all(seg1.as_bytes()).await?;
             write_half.flush().await?;
             write_half.write_all(seg2.as_bytes()).await?;
-            write_half.flush().await?;
-            write_half.write_all(seg3.as_bytes()).await?;
             write_half.flush().await
         } else {
             let req = format!(

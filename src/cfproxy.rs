@@ -637,56 +637,56 @@ fn new_timed_attempt_timeout(base: Duration, phase: Duration) -> Duration {
     eff
 }
 
-/// Параллельная гонка по альтернативным портам Cloudflare (2052, 8080, 443, 8443, 2053)
-/// и чистым Anycast IP (IPv4 + IPv6), когда стандартный порт/подсеть заблокированы мобильным оператором.
+/// Параллельная Happy-Eyeballs гонка для мобильных сетей:
+/// одновременно проверяет чистые Anycast IP из 3 независимых подсетей (188.114.96.0/22,
+/// 162.159.135.0/22, 172.64.148.0/20) на обоих портах (80 HTTP и 443 TLS с разделением ClientHello),
+/// а также штатный хостнейм, не тратя время на ожидание таймаута заблокированных 104.21/172.67 и DNS.
 async fn race_cf_mobile_endpoints(
     domain: &str,
     path: &str,
-    resolved_ip: &str,
     attempt_timeout: Duration,
-) -> Option<(RawWebSocket, String, CfFastRoute)> {
-    // Формируем список кандидатов: (dial_addr, is_clean_ip, port, secure)
+) -> (Option<RawWebSocket>, String, Option<WsError>) {
+    // (dial_addr, is_clean_ip, port, secure)
     let mut candidates: Vec<(String, bool, u16, bool)> = Vec::with_capacity(8);
 
-    if !resolved_ip.is_empty() {
-        // Альтернативные порты на основном IP домена:
-        // HTTP (с фрагментацией Host) и HTTPS (с разделением TLS ClientHello)
-        candidates.push((resolved_ip.to_string(), false, 2052, false));
-        candidates.push((resolved_ip.to_string(), false, 443, true));
-        candidates.push((resolved_ip.to_string(), false, 8443, true));
-        candidates.push((resolved_ip.to_string(), false, 8080, false));
-    }
-
-    // Чистые Anycast IP Cloudflare из незаблокированных подсетей (104.16/18, 162.159, 172.64, IPv6)
+    let prefer_plain = DISABLE_SECURE.load(std::sync::atomic::Ordering::Relaxed);
     let total_clean = CF_CLEAN_IPS.len();
-    if total_clean > 0 {
+    if total_clean >= 3 {
         let base_idx =
-            CLEAN_IP_ROUND_ROBIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % total_clean;
-        let ip1 = CF_CLEAN_IPS[base_idx].to_string();
-        let ip2 = CF_CLEAN_IPS[(base_idx + 2) % total_clean].to_string();
-        // Всегда включаем и IPv6-кандидат (последний в CF_CLEAN_IPS), если сеть поддерживает IPv6
-        let ipv6 = CF_CLEAN_IPS[total_clean - 1].to_string();
+            (CLEAN_IP_ROUND_ROBIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) * 3)
+                % total_clean;
+        let ip1 = CF_CLEAN_IPS[base_idx].to_string(); // 188.114.96..99.3
+        let ip2 = CF_CLEAN_IPS[(base_idx + 1) % total_clean].to_string(); // 162.159.135..138.42
+        let ip3 = CF_CLEAN_IPS[(base_idx + 2) % total_clean].to_string(); // 172.64.148..155.x
 
-        candidates.push((ip1.clone(), true, 80, false));
-        candidates.push((ip1, true, 443, true));
-        candidates.push((ip2.clone(), true, 2052, false));
-        candidates.push((ip2, true, 8443, true));
-        candidates.push((ipv6, true, 443, true));
+        for ip in [ip1, ip2, ip3] {
+            if prefer_plain {
+                candidates.push((ip.clone(), true, 80, false));
+                candidates.push((ip, true, 443, true));
+            } else {
+                candidates.push((ip.clone(), true, 443, true));
+                candidates.push((ip, true, 80, false));
+            }
+        }
     }
 
-    if candidates.is_empty() {
-        return None;
-    }
+    // Также параллельно запускаем подключение по самому домену (на случай кастомного не-CF хоста)
+    let def_port = if prefer_plain { 80 } else { 443 };
+    candidates.push((domain.to_string(), false, def_port, !prefer_plain));
 
-    let race_timeout = attempt_timeout.max(Duration::from_millis(2200));
+    let race_timeout = attempt_timeout.clamp(Duration::from_millis(1500), Duration::from_millis(2500));
     let (tx, mut rx) = tokio::sync::mpsc::channel(candidates.len());
     let mut tasks = Vec::with_capacity(candidates.len());
 
-    for (dial_addr, is_clean, port, secure) in candidates {
+    for (idx, (dial_addr, is_clean, port, secure)) in candidates.into_iter().enumerate() {
         let domain_s = domain.to_string();
         let path_s = path.to_string();
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
+            // Небольшой ступенчатый сдвиг (0ms для первой пары, 40ms для остальных), чтобы не дублировать нагрузку
+            if idx >= 2 {
+                tokio::time::sleep(Duration::from_millis((idx as u64) * 25)).await;
+            }
             match ws_connect_once_port(&dial_addr, port, &domain_s, &path_s, race_timeout, None, secure)
                 .await
             {
@@ -701,30 +701,48 @@ async fn race_cf_mobile_endpoints(
                         secure,
                         expires_at: Instant::now() + Duration::from_secs(600),
                     };
-                    let _ = tx.send(Some((ws, dial_addr, route))).await;
+                    let _ = tx.send(Ok((ws, dial_addr, route))).await;
                 }
-                Err(_) => {
-                    let _ = tx.send(None).await;
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
                 }
             }
         }));
     }
     drop(tx);
 
-    let deadline = tokio::time::sleep(race_timeout + Duration::from_millis(100));
+    let deadline = tokio::time::sleep(race_timeout + Duration::from_millis(150));
     tokio::pin!(deadline);
 
-    let mut winner = None;
+    let mut last_err: Option<WsError> = None;
     loop {
         tokio::select! {
             _ = &mut deadline => break,
             msg = rx.recv() => {
                 match msg {
-                    Some(Some(res)) => {
-                        winner = Some(res);
-                        break;
+                    Some(Ok((ws, winning_ip, winning_route))) => {
+                        for t in tasks {
+                            t.abort();
+                        }
+                        linfo!(
+                            " CF mobile route ok: {} via {}:{} (tls={})",
+                            domain,
+                            winning_ip,
+                            winning_route.port,
+                            winning_route.secure
+                        );
+                        *CF_FAST_ROUTE.write() = Some(winning_route);
+                        return (Some(ws), winning_ip, None);
                     }
-                    Some(None) => {}
+                    Some(Err(e)) => {
+                        if is_http_status_error(&e, 429) {
+                            for t in tasks {
+                                t.abort();
+                            }
+                            return (None, String::new(), Some(e));
+                        }
+                        last_err = Some(e);
+                    }
                     None => break,
                 }
             }
@@ -735,7 +753,17 @@ async fn race_cf_mobile_endpoints(
         t.abort();
     }
 
-    winner
+    // Если чистые IP не подошли (например, пользовательский домен не на Cloudflare), пробуем DoH IP
+    if let Some(resolved_ip) = resolve_doh(domain).await {
+        if !resolved_ip.is_empty() {
+            let ip_timeout = attempt_timeout.min(Duration::from_millis(1800));
+            if let Ok(ws) = ws_connect_once(&resolved_ip, domain, path, ip_timeout).await {
+                return (Some(ws), resolved_ip, None);
+            }
+        }
+    }
+
+    (None, String::new(), Some(last_err.unwrap_or(WsError::Timeout)))
 }
 
 pub async fn cf_connect_domain(
@@ -751,7 +779,7 @@ pub async fn cf_connect_domain(
         phase_timeout = CFPROXY_DIAL_PHASE_TIMEOUT;
     }
 
-    // 1. Быстрый путь по закешированному рабочему маршруту (чистый IP / альтернативный порт CF)
+    // 1. Быстрый путь по закешированному рабочему маршруту (чистый Anycast IP + рабочий порт 80/443)
     let cached_route = {
         let guard = CF_FAST_ROUTE.read();
         guard.as_ref().and_then(|r| {
@@ -764,7 +792,7 @@ pub async fn cf_connect_domain(
     };
 
     if let Some(route) = cached_route {
-        let fast_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
+        let fast_timeout = new_timed_attempt_timeout(phase_timeout, Duration::from_millis(1500));
         let dial_target = route.clean_ip.as_deref().unwrap_or(domain);
         match ws_connect_once_port(
             dial_target,
@@ -788,60 +816,15 @@ pub async fn cf_connect_domain(
                 if is_http_status_error(&e, 429) {
                     return (None, String::new(), Some(e));
                 }
-                // Кешированный маршрут перестал отвечать — сбрасываем и переходим к полному перебору
+                // Кешированный маршрут перестал отвечать — сбрасываем и запускаем параллельную гонку
                 clear_cf_fast_route();
             }
         }
     }
 
-    // 2. Стандартная попытка: сначала по имени хоста, затем по IP из DoH
-    let host_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
-    let (resolved_ip, primary_err) = match ws_connect_once(domain, domain, path, host_timeout).await
-    {
-        Ok(ws) => return (Some(ws), String::new(), None),
-        Err(host_err) => {
-            if is_http_status_error(&host_err, 429) {
-                return (None, String::new(), Some(host_err));
-            }
-            let resolved_ip = resolve_doh(domain).await.unwrap_or_default();
-            if !resolved_ip.is_empty() {
-                ldebug!(" CF DNS {} -> {}", domain, resolved_ip);
-                let ip_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
-                match ws_connect_once(&resolved_ip, domain, path, ip_timeout).await {
-                    Ok(ws) => return (Some(ws), resolved_ip, None),
-                    Err(ip_err) => {
-                        if is_http_status_error(&ip_err, 429) {
-                            return (None, resolved_ip, Some(ip_err));
-                        }
-                        (resolved_ip, ip_err)
-                    }
-                }
-            } else {
-                ldebug!(" CF DNS {} -> no result", domain);
-                (String::new(), host_err)
-            }
-        }
-    };
-
-    // 3. Мобильный фоллбэк: если стандартный порт/IP заблокирован ТСПУ (Timeout или Io reset),
-    // запускаем параллельную гонку по альтернативным портам CF (2052, 8080, 443, 8443) и чистым Anycast IP!
-    if matches!(primary_err, WsError::Timeout | WsError::Io(_)) {
-        if let Some((ws, winning_ip, winning_route)) =
-            race_cf_mobile_endpoints(domain, path, &resolved_ip, phase_timeout).await
-        {
-            linfo!(
-                " CF mobile bypass ok: {} via {}:{} (tls={})",
-                domain,
-                winning_ip,
-                winning_route.port,
-                winning_route.secure
-            );
-            *CF_FAST_ROUTE.write() = Some(winning_route);
-            return (Some(ws), winning_ip, None);
-        }
-    }
-
-    (None, resolved_ip, Some(primary_err))
+    // 2. Параллельная Happy-Eyeballs гонка по чистым Anycast IP (188.114.x.x, 162.159.x.x, 172.64.x.x)
+    // на портах 80 и 443 без ожидания таймаута заблокированных 104.21/172.67 и мобильного DNS.
+    race_cf_mobile_endpoints(domain, path, phase_timeout).await
 }
 
 pub fn log_cf_conn_error(msg: &str, err: &WsError) {
