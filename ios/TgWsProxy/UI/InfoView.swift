@@ -30,7 +30,7 @@ struct InfoView: View {
             .frame(width: 64, height: 64)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-            Text("TG WS Proxy".tgLoc)
+            Text("KiiXY")
                 .font(.title3.bold())
             Text(verbatim: version)
                 .font(.caption.monospacedDigit())

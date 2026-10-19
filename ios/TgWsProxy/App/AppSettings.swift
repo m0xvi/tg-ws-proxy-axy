@@ -113,7 +113,7 @@ enum AccentChoice: String, CaseIterable {
     }
 
     static var current: AccentChoice {
-        AccentChoice(rawValue: UserDefaults.standard.string(forKey: "app.accent") ?? "") ?? .telegram
+        AccentChoice(rawValue: UserDefaults.standard.string(forKey: "app.accent") ?? "") ?? .pink
     }
 }
 
@@ -146,7 +146,7 @@ final class AppSettings: ObservableObject {
         let d = UserDefaults.standard
         theme = AppTheme(rawValue: d.string(forKey: Self.themeKey) ?? "") ?? .system
         language = AppLanguage(rawValue: d.string(forKey: "app.language") ?? "") ?? .system
-        accent = AccentChoice(rawValue: d.string(forKey: Self.accentKey) ?? "") ?? .telegram
+        accent = AccentChoice(rawValue: d.string(forKey: Self.accentKey) ?? "") ?? .pink
         autoStart = d.object(forKey: "app.autoStart") as? Bool ?? false
         reconnect = d.object(forKey: "app.reconnect") as? Bool ?? true
         notifications = d.object(forKey: "app.notifications") as? Bool ?? false

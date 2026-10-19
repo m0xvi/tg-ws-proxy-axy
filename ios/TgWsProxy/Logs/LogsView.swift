@@ -52,10 +52,10 @@ struct LogsView: View {
                 .navigationTitle("Логи ядра".tgLoc)
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
+                    ToolbarItem(placement: .navigationBarLeading) {
                         Button("Закрыть".tgLoc) { dismiss() }
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItem(placement: .navigationBarTrailing) {
                         Menu {
                             ShareLink(item: store.joined()) {
                                 Label("Поделиться".tgLoc, systemImage: "square.and.arrow.up")

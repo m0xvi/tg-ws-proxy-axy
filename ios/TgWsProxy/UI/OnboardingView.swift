@@ -18,7 +18,7 @@ struct OnboardingView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .shadow(color: Color.tgAccent.opacity(0.25), radius: 18, y: 8)
 
-                    Text("TG WS Proxy".tgLoc)
+                    Text("KiiXY")
                         .font(.largeTitle.bold())
                 }
 

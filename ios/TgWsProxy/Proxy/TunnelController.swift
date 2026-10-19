@@ -13,7 +13,7 @@ final class TunnelController {
     private var manager: NETunnelProviderManager?
 
     private var providerBundleID: String {
-        (Bundle.main.bundleIdentifier ?? "com.delewer.tgwsproxy") + ".tunnel"
+        (Bundle.main.bundleIdentifier ?? "com.m0xvi.kiixy") + ".tunnel"
     }
 
     @discardableResult

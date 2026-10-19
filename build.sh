@@ -72,7 +72,7 @@ fi
 
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$DEVELOPER_DIR/usr/bin:$PATH"
 
-BUNDLE_ID="com.delewer.tgwsproxy"
+BUNDLE_ID="com.m0xvi.kiixy"
 
 if [ "$SIMULATOR" -eq 1 ]; then
   SDK="iphonesimulator"
@@ -182,13 +182,24 @@ else
   rm -rf "$STAGE"
   mkdir -p "$STAGE/Payload"
   cp -R "$APP" "$STAGE/Payload/"
+  xattr -cr "$STAGE/Payload" 2>/dev/null || true
+  if [ -d "$STAGE/Payload/TgWsProxy.app/PlugIns" ]; then
+    for APPEX in "$STAGE/Payload/TgWsProxy.app/PlugIns"/*.appex; do
+      [ -d "$APPEX" ] && codesign --force --sign - --timestamp=none "$APPEX" 2>/dev/null || true
+    done
+  fi
+  codesign --force --sign - --timestamp=none "$STAGE/Payload/TgWsProxy.app" 2>/dev/null || true
   if [ "$WITH_VPN" -eq 1 ]; then
     IPA="$OUTPUT_DIR/TgWsProxy-vpn.ipa"
   else
     IPA="$OUTPUT_DIR/TgWsProxy-free.ipa"
   fi
   rm -f "$IPA"
-  (cd "$STAGE" && zip -q -r "$IPA" Payload)
+  (
+    cd "$STAGE"
+    zip -q -r "$IPA" Payload -x "*/Info.plist" "*/PkgInfo"
+    find Payload -name "Info.plist" -o -name "PkgInfo" | xargs zip -q -0 "$IPA"
+  )
   rm -rf "$STAGE"
   echo "Built IPA: $IPA"
 fi

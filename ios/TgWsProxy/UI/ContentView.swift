@@ -58,7 +58,7 @@ struct ContentView: View {
             if menuOpen {
                 Color.black.opacity(0.001)
                     .ignoresSafeArea()
-                    .onTapGesture { withAnimation(.snappy) { menuOpen = false } }
+                    .onTapGesture { withAnimation(.easeInOut(duration: 0.22)) { menuOpen = false } }
             }
 
             FloatingNavMenu(selection: $tab, isOpen: $menuOpen)
@@ -86,7 +86,7 @@ struct ContentView: View {
                 .font(.title2.bold())
             Spacer()
         }
-        .animation(.snappy, value: tab)
+        .animation(.easeInOut(duration: 0.22), value: tab)
         .padding(.horizontal, 20)
     }
 

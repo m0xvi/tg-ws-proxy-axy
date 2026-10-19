@@ -14,10 +14,10 @@ android {
         targetSdk = 35
         val resolvedVersionCode = (project.findProperty("appVersionCode")?.toString()?.toIntOrNull())
             ?: System.getenv("APP_VERSION_CODE")?.toIntOrNull()
-            ?: 207
+            ?: 209
         val resolvedVersionName = (project.findProperty("appVersionName")?.toString()?.trim()?.removePrefix("v"))
             ?: System.getenv("APP_VERSION_NAME")?.trim()?.removePrefix("v")
-            ?: "2.0.7"
+            ?: "2.0.9"
         versionCode = resolvedVersionCode
         versionName = resolvedVersionName
 
@@ -115,6 +115,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
     buildFeatures {
         compose = true

@@ -399,7 +399,7 @@
 					"-lresolv",
 					"-lz",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.delewer.tgwsproxy;
+				PRODUCT_BUNDLE_IDENTIFIER = com.m0xvi.kiixy;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -446,7 +446,7 @@
 					"-lresolv",
 					"-lz",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.delewer.tgwsproxy;
+				PRODUCT_BUNDLE_IDENTIFIER = com.m0xvi.kiixy;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -592,7 +592,7 @@
 					"-lresolv",
 					"-lz",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.delewer.tgwsproxy.tunnel;
+				PRODUCT_BUNDLE_IDENTIFIER = com.m0xvi.kiixy.tunnel;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -637,7 +637,7 @@
 					"-lresolv",
 					"-lz",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.delewer.tgwsproxy.tunnel;
+				PRODUCT_BUNDLE_IDENTIFIER = com.m0xvi.kiixy.tunnel;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
