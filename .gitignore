@@ -1,0 +1,50 @@
+# Rust
+/target/
+
+# Android / Gradle
+.gradle/
+/build/
+/app/build/
+local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+out/
+.externalNativeBuild/
+.cxx/
+captures/
+output-metadata.json
+
+# iOS / Xcode
+.build/
+dist/
+DerivedData/
+xcuserdata/
+*.ipa
+*.xcarchive
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+
+# IDE & OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Signing keys
+*.jks
+*.keystore
+*.p12
+*.mobileprovision

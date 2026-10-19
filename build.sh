@@ -1,0 +1,194 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+
+SIMULATOR=0
+WITH_VPN=0
+INSTALL=0
+CONFIGURATION="Release"
+OUTPUT_DIR="$ROOT/dist"
+
+usage() {
+  cat <<'EOF'
+TG WS Proxy build tool
+
+Usage:
+  ./build.sh [--vpn] [--sim [--install]] [--debug]
+
+Options:
+      --vpn      bundle the Packet Tunnel / Network Extension
+      --sim      build for the iOS Simulator instead of a device
+      --install  install and launch on the currently booted simulator
+      --debug    Debug build (default: Release)
+  -h, --help     show this help
+
+Output:
+  dist/TgWsProxy-free.ipa   default; installs with any Apple ID, the proxy
+                            is held in the background by CoreLocation
+  dist/TgWsProxy-vpn.ipa    --vpn; needs a provisioning profile with
+                            packet-tunnel-provider
+
+Note:
+  LiveContainer cannot load app extensions, so use the default build there.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --vpn)
+      WITH_VPN=1; shift ;;
+    --sim)
+      SIMULATOR=1; shift ;;
+    --install)
+      INSTALL=1; SIMULATOR=1; shift ;;
+    --debug)
+      CONFIGURATION="Debug"; shift ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 2 ;;
+  esac
+done
+
+: "${DEVELOPER_DIR:=$(xcode-select -p)}"
+if [ -z "$DEVELOPER_DIR" ] || [ "$DEVELOPER_DIR" = "/Library/Developer/CommandLineTools" ]; then
+  for CANDIDATE in /Applications/Xcode.app/Contents/Developer /Applications/Xcode-beta.app/Contents/Developer; do
+    if [ -d "$CANDIDATE" ]; then
+      DEVELOPER_DIR="$CANDIDATE"
+      break
+    fi
+  done
+fi
+export DEVELOPER_DIR
+
+if [ -z "$DEVELOPER_DIR" ] || [ ! -d "$DEVELOPER_DIR" ]; then
+  echo "Xcode developer directory not found. Run: sudo xcode-select -s /Applications/Xcode.app" >&2
+  exit 1
+fi
+
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$DEVELOPER_DIR/usr/bin:$PATH"
+
+BUNDLE_ID="com.delewer.tgwsproxy"
+
+if [ "$SIMULATOR" -eq 1 ]; then
+  SDK="iphonesimulator"
+  DESTINATION="generic/platform=iOS Simulator"
+  NAME="sim"
+else
+  SDK="iphoneos"
+  DESTINATION="generic/platform=iOS"
+  NAME="ios"
+fi
+
+if [ "$WITH_VPN" -eq 1 ]; then
+  NAME="$NAME-vpn"
+fi
+
+DD="$ROOT/.build/dynamic/$NAME"
+PRODUCTS="$DD/Build/Products/${CONFIGURATION}-${SDK}"
+APP="$PRODUCTS/TgWsProxy.app"
+APP_FLAGS=""
+ENTITLEMENTS=""
+
+if [ "$WITH_VPN" -eq 1 ]; then
+  APP_FLAGS="TGWS_TUNNEL_AVAILABLE"
+  ENTITLEMENTS="ios/TgWsProxy/TgWsProxyVPN.entitlements"
+fi
+
+echo "TG WS Proxy iOS dynamic build"
+echo "  target:     $SDK"
+echo "  tunnel:     $([ "$WITH_VPN" -eq 1 ] && echo yes || echo no)"
+echo "  config:     $CONFIGURATION"
+echo "  bundle id:  $BUNDLE_ID"
+echo "  output:     $DD"
+echo "  rust core:  Cargo.toml -> libtgwsproxy.a"
+
+common_xcodebuild() {
+  xcodebuild \
+    -project TgWsProxy.xcodeproj \
+    -configuration "$CONFIGURATION" \
+    -sdk "$SDK" \
+    -destination "$DESTINATION" \
+    -derivedDataPath "$DD" \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_IDENTITY="" \
+    "$@"
+}
+
+if [ "$WITH_VPN" -eq 1 ]; then
+  echo ">>> Building PacketTunnel"
+  common_xcodebuild \
+    -scheme PacketTunnel \
+    PRODUCT_BUNDLE_IDENTIFIER="${BUNDLE_ID}.tunnel" \
+    build
+fi
+
+echo ">>> Building app"
+if [ -n "$ENTITLEMENTS" ]; then
+  common_xcodebuild \
+    -scheme TgWsProxy \
+    PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+    CODE_SIGN_ENTITLEMENTS="$ENTITLEMENTS" \
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS="\$(inherited) $APP_FLAGS" \
+    build
+else
+  common_xcodebuild \
+    -scheme TgWsProxy \
+    PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+    SWIFT_ACTIVE_COMPILATION_CONDITIONS="\$(inherited) $APP_FLAGS" \
+    build
+fi
+
+[ -d "$APP" ] || { echo "App not found: $APP" >&2; exit 1; }
+rm -rf "$APP/PlugIns"
+
+if [ "$WITH_VPN" -eq 1 ]; then
+  mkdir -p "$APP/PlugIns"
+  cp -R "$PRODUCTS/PacketTunnel.appex" "$APP/PlugIns/"
+fi
+
+if [ "$SIMULATOR" -eq 1 ]; then
+  echo "Built simulator app: $APP"
+  if [ "$INSTALL" -eq 1 ]; then
+    UDID="$(xcrun simctl list devices booted -j | /usr/bin/python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+for devices in d["devices"].values():
+    for device in devices:
+        if device.get("state") == "Booted":
+            print(device["udid"]); raise SystemExit
+')"
+    [ -n "$UDID" ] || { echo "No booted simulator. Boot one in Device Hub first." >&2; exit 1; }
+    echo ">>> Installing on $UDID"
+    xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
+    xcrun simctl uninstall "$UDID" "$BUNDLE_ID" 2>/dev/null || true
+    xcrun simctl install "$UDID" "$APP"
+    xcrun simctl launch "$UDID" "$BUNDLE_ID"
+    echo "Installed and launched. Embedded extensions:"
+    if [ -d "$APP/PlugIns" ]; then
+      find "$APP/PlugIns" -mindepth 1 -maxdepth 1 -type d -name '*.appex' -print
+    else
+      echo "  (none)"
+    fi
+  fi
+else
+  mkdir -p "$OUTPUT_DIR"
+  STAGE="$OUTPUT_DIR/.stage-$NAME"
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE/Payload"
+  cp -R "$APP" "$STAGE/Payload/"
+  if [ "$WITH_VPN" -eq 1 ]; then
+    IPA="$OUTPUT_DIR/TgWsProxy-vpn.ipa"
+  else
+    IPA="$OUTPUT_DIR/TgWsProxy-free.ipa"
+  fi
+  rm -f "$IPA"
+  (cd "$STAGE" && zip -q -r "$IPA" Payload)
+  rm -rf "$STAGE"
+  echo "Built IPA: $IPA"
+fi
