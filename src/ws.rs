@@ -8,14 +8,219 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use std::collections::HashMap;
+use std::io::IoSlice;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
+
+// ---------------------------------------------------------------------------
+// DPI Bypass Stream — TLS ClientHello Record Splitting & TCP Segmentation
+// ---------------------------------------------------------------------------
+
+/// Разбивает один TLS ClientHello рекорд (0x16 0x03 ..) на 3 валидных TLS рекорда,
+/// причём второй разрез приходится прямо на середину SNI-домена.
+/// Это позволяет обходить пассивный и активный DPI (ТСПУ) на мобильных сетях без root/VPN.
+fn split_tls_client_hello_chunks(buf: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if buf.len() < 16 || buf[0] != 0x16 || buf[1] != 0x03 {
+        return None;
+    }
+    let rec_len = ((buf[3] as usize) << 8) | (buf[4] as usize);
+    if 5 + rec_len > buf.len() || rec_len < 10 {
+        return None;
+    }
+    let ver_major = buf[1];
+    let ver_minor = buf[2];
+    let payload = &buf[5..5 + rec_len];
+    // Handshake type 0x01 == ClientHello
+    if payload[0] != 0x01 {
+        return None;
+    }
+
+    // Ищем позицию SNI внутри ClientHello (после первых 38 байт заголовка/Random),
+    // чтобы разрезать пакет ровно посреди имени хоста.
+    let search_start = 38.min(payload.len());
+    let mut best_run_start = 0usize;
+    let mut best_run_len = 0usize;
+    let mut cur_start = search_start;
+    let mut cur_len = 0usize;
+    let mut has_dot = false;
+
+    for (idx, &b) in payload[search_start..].iter().enumerate() {
+        let abs_idx = search_start + idx;
+        if b.is_ascii_alphanumeric() || b == b'.' || b == b'-' {
+            if cur_len == 0 {
+                cur_start = abs_idx;
+                has_dot = false;
+            }
+            if b == b'.' {
+                has_dot = true;
+            }
+            cur_len += 1;
+            if has_dot && cur_len > best_run_len {
+                best_run_len = cur_len;
+                best_run_start = cur_start;
+            }
+        } else {
+            cur_len = 0;
+            has_dot = false;
+        }
+    }
+
+    let split1 = 2usize; // сразу после Handshake Type (0x01) и старшего байта длины
+    let split2 = if best_run_len >= 6 {
+        (best_run_start + best_run_len / 2).clamp(split1 + 2, payload.len() - 2)
+    } else {
+        (payload.len() / 2).clamp(split1 + 2, payload.len() - 2)
+    };
+
+    let part1 = &payload[..split1];
+    let part2 = &payload[split1..split2];
+    let part3 = &payload[split2..];
+
+    let make_record = |slice: &[u8]| -> Vec<u8> {
+        let l = slice.len();
+        let mut rec = Vec::with_capacity(5 + l);
+        rec.push(0x16);
+        rec.push(ver_major);
+        rec.push(ver_minor);
+        rec.push(((l >> 8) & 0xFF) as u8);
+        rec.push((l & 0xFF) as u8);
+        rec.extend_from_slice(slice);
+        rec
+    };
+
+    let mut chunks = Vec::with_capacity(4);
+    chunks.push(make_record(part1));
+    chunks.push(make_record(part2));
+    chunks.push(make_record(part3));
+    if 5 + rec_len < buf.len() {
+        chunks.push(buf[5 + rec_len..].to_vec());
+    }
+    Some(chunks)
+}
+
+pub struct DpiBypassStream {
+    inner: TcpStream,
+    first_write_done: bool,
+    pending_chunks: Vec<Vec<u8>>,
+    chunk_idx: usize,
+    byte_idx: usize,
+    orig_len: usize,
+}
+
+impl DpiBypassStream {
+    pub fn new(inner: TcpStream) -> Self {
+        Self {
+            inner,
+            first_write_done: false,
+            pending_chunks: Vec::new(),
+            chunk_idx: 0,
+            byte_idx: 0,
+            orig_len: 0,
+        }
+    }
+}
+
+impl AsyncRead for DpiBypassStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for DpiBypassStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if self.first_write_done {
+            return Pin::new(&mut self.inner).poll_write(cx, buf);
+        }
+
+        if self.pending_chunks.is_empty() {
+            if !DPI_FRAGMENTATION.load(Ordering::Relaxed) {
+                self.first_write_done = true;
+                return Pin::new(&mut self.inner).poll_write(cx, buf);
+            }
+            if let Some(chunks) = split_tls_client_hello_chunks(buf) {
+                self.pending_chunks = chunks;
+                self.chunk_idx = 0;
+                self.byte_idx = 0;
+                self.orig_len = buf.len();
+            } else {
+                self.first_write_done = true;
+                return Pin::new(&mut self.inner).poll_write(cx, buf);
+            }
+        }
+
+        while self.chunk_idx < self.pending_chunks.len() {
+            let chunk_len = self.pending_chunks[self.chunk_idx].len();
+            let byte_idx = self.byte_idx;
+            let slice = self.pending_chunks[self.chunk_idx][byte_idx..].to_vec();
+            match Pin::new(&mut self.inner).poll_write(cx, &slice) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "write zero during TLS DPI fragmentation",
+                    )));
+                }
+                Poll::Ready(Ok(n)) => {
+                    self.byte_idx += n;
+                    if self.byte_idx >= chunk_len {
+                        self.chunk_idx += 1;
+                        self.byte_idx = 0;
+                        let _ = Pin::new(&mut self.inner).poll_flush(cx);
+                    }
+                }
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        let total = self.orig_len;
+        self.pending_chunks.clear();
+        self.first_write_done = true;
+        Poll::Ready(Ok(total))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        if !self.first_write_done {
+            let mut flat = Vec::new();
+            for b in bufs {
+                flat.extend_from_slice(b);
+            }
+            return self.poll_write(cx, &flat);
+        }
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.first_write_done && self.inner.is_write_vectored()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // WS opcodes — proxy/raw_websocket.py
@@ -178,12 +383,12 @@ impl From<std::io::Error> for WsError {
 // ---------------------------------------------------------------------------
 
 enum WsReader {
-    Tls(BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>),
+    Tls(BufReader<tokio::io::ReadHalf<TlsStream<DpiBypassStream>>>),
     Plain(BufReader<tokio::io::ReadHalf<TcpStream>>),
 }
 
 enum WsWriter {
-    Tls(tokio::io::WriteHalf<TlsStream<TcpStream>>),
+    Tls(tokio::io::WriteHalf<TlsStream<DpiBypassStream>>),
     Plain(tokio::io::WriteHalf<TcpStream>),
 }
 
@@ -613,8 +818,8 @@ fn server_name(domain: &str) -> ServerName<'static> {
 
 // Типизированный handshake: возвращает готовый RawWebSocket без type-erasure.
 async fn handshake_tls(
-    read_half: tokio::io::ReadHalf<TlsStream<TcpStream>>,
-    mut write_half: tokio::io::WriteHalf<TlsStream<TcpStream>>,
+    read_half: tokio::io::ReadHalf<TlsStream<DpiBypassStream>>,
+    mut write_half: tokio::io::WriteHalf<TlsStream<DpiBypassStream>>,
     domain: &str,
     path: &str,
     timeout: Duration,
@@ -662,11 +867,37 @@ async fn handshake_plain(
     let mut ws_key_bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut ws_key_bytes);
     let ws_key = base64::engine::general_purpose::STANDARD.encode(ws_key_bytes);
-    let req = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n",
-        path, domain, ws_key
-    );
-    match tokio::time::timeout(timeout, write_half.write_all(req.as_bytes())).await {
+
+    let write_res = tokio::time::timeout(timeout, async {
+        if DPI_FRAGMENTATION.load(Ordering::Relaxed) && domain.len() >= 4 {
+            // DPI-обход на HTTP (порт 80/2052/8080):
+            // 1) mixed-case "hOsT:" (RFC 7230 §3.2 регистронезависим, но сбивает сигнатуры ТСПУ)
+            // 2) TCP-сегментация посреди метода GET и посреди имени домена в заголовке Host
+            let mid = domain.len() / 2;
+            let seg1 = b"GET ";
+            let seg2 = format!("{} HTTP/1.1\r\nhOsT: {}", path, &domain[..mid]);
+            let seg3 = format!(
+                "{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n",
+                &domain[mid..],
+                ws_key
+            );
+            write_half.write_all(seg1).await?;
+            write_half.flush().await?;
+            write_half.write_all(seg2.as_bytes()).await?;
+            write_half.flush().await?;
+            write_half.write_all(seg3.as_bytes()).await?;
+            write_half.flush().await
+        } else {
+            let req = format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n",
+                path, domain, ws_key
+            );
+            write_half.write_all(req.as_bytes()).await
+        }
+    })
+    .await;
+
+    match write_res {
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(WsError::Io(e)),
         Err(_) => return Err(WsError::Timeout),
@@ -765,6 +996,16 @@ async fn read_line<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<String, Ws
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
+/// Форматирует адрес и порт с поддержкой IPv6 (`[2606:4700::1]:443`).
+pub fn format_host_port(dial_addr: &str, port: u16) -> String {
+    let trimmed = dial_addr.trim();
+    if trimmed.contains(':') && !trimmed.starts_with('[') {
+        format!("[{}]:{}", trimmed, port)
+    } else {
+        format!("{}:{}", trimmed, port)
+    }
+}
+
 // wsConnectOnce — заголовки 1-в-1 как в Python raw_websocket.py (без User-Agent).
 pub async fn ws_connect_once(
     dial_addr: &str,
@@ -784,15 +1025,24 @@ pub async fn ws_connect_once_full(
     sni: Option<&str>,
     secure: bool,
 ) -> Result<RawWebSocket, WsError> {
+    let port = if secure { 443 } else { 80 };
+    ws_connect_once_port(dial_addr, port, domain, path, timeout, sni, secure).await
+}
+
+pub async fn ws_connect_once_port(
+    dial_addr: &str,
+    port: u16,
+    domain: &str,
+    path: &str,
+    timeout: Duration,
+    sni: Option<&str>,
+    secure: bool,
+) -> Result<RawWebSocket, WsError> {
     if dial_addr.is_empty() {
         return Err(WsError::Other("empty dial address".to_string()));
     }
     let path = if path.is_empty() { WS_PATH } else { path };
-    let target_addr = if secure {
-        format!("{}:443", dial_addr)
-    } else {
-        format!("{}:80", dial_addr)
-    };
+    let target_addr = format_host_port(dial_addr, port);
 
     let raw_conn = match tokio::time::timeout(timeout, TcpStream::connect(&target_addr)).await {
         Ok(Ok(c)) => c,
@@ -817,17 +1067,18 @@ pub async fn ws_connect_once_full(
     let sni_server = server_name(sni_name);
 
     let handshake_timeout = ws_handshake_timeout(timeout);
+    let dpi_stream = DpiBypassStream::new(raw_conn);
     let tls_conn =
-        match tokio::time::timeout(handshake_timeout, connector.connect(sni_server, raw_conn)).await {
+        match tokio::time::timeout(handshake_timeout, connector.connect(sni_server, dpi_stream)).await {
             Ok(Ok(c)) => c,
             Ok(Err(e)) => {
                 if e.kind() != std::io::ErrorKind::ConnectionReset {
-                    ldebug!(" ws tls fail {} via {}: {}", domain, dial_addr, e);
+                    ldebug!(" ws tls fail {} via {}:{}: {}", domain, dial_addr, port, e);
                 }
                 return Err(WsError::Io(e));
             }
             Err(_) => {
-                ldebug!(" ws tls fail {} via {}: timeout", domain, dial_addr);
+                ldebug!(" ws tls fail {} via {}:{}: timeout", domain, dial_addr, port);
                 return Err(WsError::Timeout);
             }
         };
@@ -933,14 +1184,103 @@ pub async fn connect_one_ws_full(
     None
 }
 
+static ACTIVE_FRONTING_IDX: AtomicUsize = AtomicUsize::new(0);
+
 pub async fn connect_fronted(ip: &str, domain: &str, path: &str) -> Option<RawWebSocket> {
     let path = if path.is_empty() { WS_PATH } else { path };
-    match ws_connect_full_opts(ip, domain, path, WS_POOL_FRONTING_TIMEOUT, Some(FRONTING_SNI), Some(true)).await {
-        Ok(ws) => {
-            STATS.connections_fronting.fetch_add(1, Ordering::Relaxed);
-            crate::proxy::set_ws_pool_fronting_first(true);
-            Some(ws)
+    let total_snis = FRONTING_SNIS.len();
+    if total_snis == 0 {
+        return None;
+    }
+    let start_idx = ACTIVE_FRONTING_IDX.load(Ordering::Relaxed) % total_snis;
+
+    // Пробуем активный SNI и при неудаче перебираем остальные из пула FRONTING_SNIS
+    for offset in 0..total_snis.min(3) {
+        let idx = (start_idx + offset) % total_snis;
+        let sni_candidate = FRONTING_SNIS[idx];
+        match ws_connect_full_opts(
+            ip,
+            domain,
+            path,
+            WS_POOL_FRONTING_TIMEOUT,
+            Some(sni_candidate),
+            Some(true),
+        )
+        .await
+        {
+            Ok(ws) => {
+                ACTIVE_FRONTING_IDX.store(idx, Ordering::Relaxed);
+                STATS.connections_fronting.fetch_add(1, Ordering::Relaxed);
+                crate::proxy::set_ws_pool_fronting_first(true);
+                return Some(ws);
+            }
+            Err(WsError::Handshake(h)) if h.is_redirect() => {
+                // 302 редирект означает, что TLS прошёл, но сам DC не принимает WS для этого запроса
+                ACTIVE_FRONTING_IDX.store(idx, Ordering::Relaxed);
+                return None;
+            }
+            Err(_) => continue,
         }
-        Err(_) => None,
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_host_port_ipv4_and_ipv6() {
+        assert_eq!(format_host_port("104.16.132.229", 443), "104.16.132.229:443");
+        assert_eq!(format_host_port("kws2.web.telegram.org", 443), "kws2.web.telegram.org:443");
+        assert_eq!(
+            format_host_port("2606:4700::6810:84e5", 443),
+            "[2606:4700::6810:84e5]:443"
+        );
+        assert_eq!(
+            format_host_port("[2606:4700::6810:84e5]", 8443),
+            "[2606:4700::6810:84e5]:8443"
+        );
+    }
+
+    #[test]
+    fn test_split_tls_client_hello_chunks() {
+        // Собираем синтетический TLS ClientHello рекорд с SNI "kws2.web.telegram.org"
+        let mut payload = vec![0x01u8]; // Handshake type ClientHello
+        payload.extend_from_slice(&[0x00, 0x00, 0x40]); // length placeholder
+        payload.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
+        payload.extend_from_slice(&[0xAA; 32]); // 32 bytes Random
+        payload.push(0x00); // session id len 0
+        payload.extend_from_slice(b"xxxxkws2.web.telegram.orgyyyy");
+
+        let rec_len = payload.len();
+        let mut record = vec![
+            0x16,
+            0x03,
+            0x01,
+            ((rec_len >> 8) & 0xFF) as u8,
+            (rec_len & 0xFF) as u8,
+        ];
+        record.extend_from_slice(&payload);
+
+        let chunks = split_tls_client_hello_chunks(&record).expect("must split ClientHello");
+        assert_eq!(chunks.len(), 3);
+
+        let mut reassembled = Vec::new();
+        for c in &chunks {
+            assert_eq!(c[0], 0x16);
+            assert_eq!(c[1], 0x03);
+            assert_eq!(c[2], 0x01);
+            let l = ((c[3] as usize) << 8) | (c[4] as usize);
+            assert_eq!(c.len(), 5 + l);
+            reassembled.extend_from_slice(&c[5..]);
+        }
+        // Полезная нагрузка после объединения всех 3 TLS-рекордов должна совпадать 1-в-1
+        assert_eq!(reassembled, payload);
+        // Ни один из фрагментов не должен содержать полный SNI целиком
+        for c in &chunks {
+            let s = String::from_utf8_lossy(&c[5..]);
+            assert!(!s.contains("kws2.web.telegram.org"));
+        }
     }
 }

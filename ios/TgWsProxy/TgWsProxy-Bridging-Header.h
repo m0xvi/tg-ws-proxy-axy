@@ -18,6 +18,8 @@ void SetCfProxyConfig(int32_t enabled, int32_t priority, const char *user_domain
 void SetCfWorkerDomains(const char *domains);
 void SetFakeTlsDomain(const char *domain);
 void SetDisableSecure(int32_t v);
+void SetDpiFragmentation(int32_t v);
+void NotifyNetworkChanged(void);
 void SetForceTestDc(int32_t v);
 void SetProxyProtocol(int32_t v);
 void SetSecret(const char *secret);

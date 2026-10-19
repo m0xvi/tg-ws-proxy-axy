@@ -1,5 +1,5 @@
 use crate::config::*;
-use crate::ws::{is_http_status_error, ws_connect_once, RawWebSocket, WsError};
+use crate::ws::{is_http_status_error, ws_connect_once, ws_connect_once_port, RawWebSocket, WsError};
 use crate::{ldebug, lerror, linfo, lwarn};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -9,8 +9,23 @@ use tokio::sync::Semaphore;
 use once_cell::sync::Lazy;
 static CFPROXY_SEM: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(CFPROXY_GLOBAL_PARALLEL));
 
+#[derive(Clone, Debug)]
+pub struct CfFastRoute {
+    pub clean_ip: Option<String>,
+    pub port: u16,
+    pub secure: bool,
+    pub expires_at: Instant,
+}
+
+static CF_FAST_ROUTE: Lazy<parking_lot::RwLock<Option<CfFastRoute>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
+
+pub fn clear_cf_fast_route() {
+    *CF_FAST_ROUTE.write() = None;
+}
+
 // ---------------------------------------------------------------------------
-// Domain decoding
+// Domain decoding & normalization
 // ---------------------------------------------------------------------------
 
 pub fn decode_cf_domain(s: &str) -> String {
@@ -19,6 +34,10 @@ pub fn decode_cf_domain(s: &str) -> String {
     }
     let suffix = ".co.uk";
     let p = &s[..s.len() - 4];
+    // Кодированные встроенные домены всегда состоят из одной метки до ".com"
+    if p.contains('.') || p.contains('-') {
+        return s.to_string();
+    }
     let mut n = 0i32;
     for c in p.chars() {
         if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
@@ -42,7 +61,8 @@ pub fn decode_cf_domain(s: &str) -> String {
     out
 }
 
-pub fn normalize_cf_domain(s: &str) -> String {
+/// Нормализует встроенный кодированный домен (из CFPROXY_ENC или GitHub-списка Flowseal).
+pub fn normalize_encoded_cf_domain(s: &str) -> String {
     let mut decoded = decode_cf_domain(s.trim()).trim().to_lowercase();
     while decoded.ends_with('.') {
         decoded.pop();
@@ -53,10 +73,37 @@ pub fn normalize_cf_domain(s: &str) -> String {
     decoded
 }
 
+/// Универсальная нормализация домена: поддерживает как встроенные кодированные домены (.co.uk),
+/// так и ЛЮБЫЕ пользовательские домены (.ru, .com, .xyz, .workers.dev, .pages.dev и т.д.).
+pub fn normalize_cf_domain(s: &str) -> String {
+    let cleaned = clean_domain_input(s);
+    if cleaned.is_empty() {
+        return String::new();
+    }
+    // Если строка входит в список встроенных зашифрованных токенов CFPROXY_ENC — декодируем её.
+    if CFPROXY_ENC.iter().any(|&enc| enc.eq_ignore_ascii_case(&cleaned)) {
+        return normalize_encoded_cf_domain(&cleaned);
+    }
+    if is_valid_domain(&cleaned) {
+        return cleaned;
+    }
+    String::new()
+}
+
+/// Определяет, является ли домен serverless/worker-хостом (не использующим поддомены kws1..5).
+pub fn is_worker_style_domain(domain: &str) -> bool {
+    let d = domain.trim().to_lowercase();
+    d.ends_with(".workers.dev")
+        || d.ends_with(".pages.dev")
+        || d.ends_with(".yandexcloud.net")
+        || d.ends_with(".vercel.app")
+        || d.ends_with(".netlify.app")
+}
+
 pub fn default_cfproxy_domains() -> Vec<String> {
     let mut domains = Vec::with_capacity(CFPROXY_ENC.len());
     for enc in CFPROXY_ENC {
-        let d = normalize_cf_domain(enc);
+        let d = normalize_encoded_cf_domain(enc);
         if !d.is_empty() {
             domains.push(d);
         }
@@ -381,7 +428,10 @@ pub async fn try_refresh_cfproxy_domains() -> bool {
 
     // Валидация пула как в оригинале: минимум CFPROXY_MIN_VALID_DOMAINS
     // валидных доменов, иначе игнорируем payload и остаёмся на текущем пуле.
-    let decoded: Vec<String> = fetched_raw.iter().map(|d| normalize_cf_domain(d)).collect();
+    let decoded: Vec<String> = fetched_raw
+        .iter()
+        .map(|d| normalize_encoded_cf_domain(d))
+        .collect();
     let pool = normalize_domain_pool(&decoded);
     if pool.len() >= CFPROXY_MIN_VALID_DOMAINS {
         let merged = merge_cfproxy_domains(&[pool.clone(), default_cfproxy_domains()]);
@@ -412,7 +462,7 @@ pub async fn try_refresh_cfproxy_domains() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// DNS over HTTPS (DoH) resolve
+// DNS over HTTPS (DoH) resolve (с поддержкой мобильных сетей РФ и IPv6)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -430,6 +480,10 @@ struct DohResponse {
 
 static DOH_CACHE: Lazy<parking_lot::RwLock<std::collections::HashMap<String, (String, Instant)>>> =
     Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+pub fn clear_doh_cache() {
+    DOH_CACHE.write().clear();
+}
 
 fn pick_preferred_ip(candidates: &[String]) -> String {
     let mut fallback_v6 = String::new();
@@ -456,11 +510,14 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         }
     }
 
+    // Включаем Яндекс DoH (работает во всех мобильных сетях РФ и белых списках)
+    // и прямое обращение к 8.8.8.8 по HTTPS без зависимости от системного DNS.
     let endpoints = [
-        "https://cloudflare-dns.com/dns-query",
+        "https://common.dns.yandex.net/dns-query",
+        "https://8.8.8.8/dns-query",
         "https://dns.google/dns-query",
-        "https://dns.quad9.net/dns-query",
         "https://dns.adguard-dns.com/dns-query",
+        "https://cloudflare-dns.com/dns-query",
     ];
 
     let client = reqwest::Client::builder()
@@ -486,8 +543,10 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
                 if resp.status().as_u16() == 200 {
                     if let Ok(r) = resp.json::<DohResponse>().await {
                         for ans in r.answer {
-                            if ans.type_ == 1 {
-                                let _ = tx.send(Some(ans.data)).await;
+                            if (ans.type_ == 1 || ans.type_ == 28)
+                                && ans.data.trim().parse::<std::net::IpAddr>().is_ok()
+                            {
+                                let _ = tx.send(Some(ans.data.trim().to_string())).await;
                                 return;
                             }
                         }
@@ -556,13 +615,16 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
             (ip.clone(), Instant::now() + Duration::from_secs(300)),
         );
     }
-    
+
     final_ip
 }
 
 // ---------------------------------------------------------------------------
-// cfConnectDomain
+// cfConnectDomain — с мультипортовым фоллбэком и чистыми Cloudflare Anycast IP
 // ---------------------------------------------------------------------------
+
+static CLEAN_IP_ROUND_ROBIN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 fn new_timed_attempt_timeout(base: Duration, phase: Duration) -> Duration {
     let mut eff = base;
@@ -573,6 +635,107 @@ fn new_timed_attempt_timeout(base: Duration, phase: Duration) -> Duration {
         eff = phase;
     }
     eff
+}
+
+/// Параллельная гонка по альтернативным портам Cloudflare (2052, 8080, 443, 8443, 2053)
+/// и чистым Anycast IP (IPv4 + IPv6), когда стандартный порт/подсеть заблокированы мобильным оператором.
+async fn race_cf_mobile_endpoints(
+    domain: &str,
+    path: &str,
+    resolved_ip: &str,
+    attempt_timeout: Duration,
+) -> Option<(RawWebSocket, String, CfFastRoute)> {
+    // Формируем список кандидатов: (dial_addr, is_clean_ip, port, secure)
+    let mut candidates: Vec<(String, bool, u16, bool)> = Vec::with_capacity(8);
+
+    if !resolved_ip.is_empty() {
+        // Альтернативные порты на основном IP домена:
+        // HTTP (с фрагментацией Host) и HTTPS (с разделением TLS ClientHello)
+        candidates.push((resolved_ip.to_string(), false, 2052, false));
+        candidates.push((resolved_ip.to_string(), false, 443, true));
+        candidates.push((resolved_ip.to_string(), false, 8443, true));
+        candidates.push((resolved_ip.to_string(), false, 8080, false));
+    }
+
+    // Чистые Anycast IP Cloudflare из незаблокированных подсетей (104.16/18, 162.159, 172.64, IPv6)
+    let total_clean = CF_CLEAN_IPS.len();
+    if total_clean > 0 {
+        let base_idx =
+            CLEAN_IP_ROUND_ROBIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % total_clean;
+        let ip1 = CF_CLEAN_IPS[base_idx].to_string();
+        let ip2 = CF_CLEAN_IPS[(base_idx + 2) % total_clean].to_string();
+        // Всегда включаем и IPv6-кандидат (последний в CF_CLEAN_IPS), если сеть поддерживает IPv6
+        let ipv6 = CF_CLEAN_IPS[total_clean - 1].to_string();
+
+        candidates.push((ip1.clone(), true, 80, false));
+        candidates.push((ip1, true, 443, true));
+        candidates.push((ip2.clone(), true, 2052, false));
+        candidates.push((ip2, true, 8443, true));
+        candidates.push((ipv6, true, 443, true));
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let race_timeout = attempt_timeout.max(Duration::from_millis(2200));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(candidates.len());
+    let mut tasks = Vec::with_capacity(candidates.len());
+
+    for (dial_addr, is_clean, port, secure) in candidates {
+        let domain_s = domain.to_string();
+        let path_s = path.to_string();
+        let tx = tx.clone();
+        tasks.push(tokio::spawn(async move {
+            match ws_connect_once_port(&dial_addr, port, &domain_s, &path_s, race_timeout, None, secure)
+                .await
+            {
+                Ok(ws) => {
+                    let route = CfFastRoute {
+                        clean_ip: if is_clean {
+                            Some(dial_addr.clone())
+                        } else {
+                            None
+                        },
+                        port,
+                        secure,
+                        expires_at: Instant::now() + Duration::from_secs(600),
+                    };
+                    let _ = tx.send(Some((ws, dial_addr, route))).await;
+                }
+                Err(_) => {
+                    let _ = tx.send(None).await;
+                }
+            }
+        }));
+    }
+    drop(tx);
+
+    let deadline = tokio::time::sleep(race_timeout + Duration::from_millis(100));
+    tokio::pin!(deadline);
+
+    let mut winner = None;
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            msg = rx.recv() => {
+                match msg {
+                    Some(Some(res)) => {
+                        winner = Some(res);
+                        break;
+                    }
+                    Some(None) => {}
+                    None => break,
+                }
+            }
+        }
+    }
+
+    for t in tasks {
+        t.abort();
+    }
+
+    winner
 }
 
 pub async fn cf_connect_domain(
@@ -588,26 +751,97 @@ pub async fn cf_connect_domain(
         phase_timeout = CFPROXY_DIAL_PHASE_TIMEOUT;
     }
 
+    // 1. Быстрый путь по закешированному рабочему маршруту (чистый IP / альтернативный порт CF)
+    let cached_route = {
+        let guard = CF_FAST_ROUTE.read();
+        guard.as_ref().and_then(|r| {
+            if Instant::now() < r.expires_at {
+                Some(r.clone())
+            } else {
+                None
+            }
+        })
+    };
+
+    if let Some(route) = cached_route {
+        let fast_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
+        let dial_target = route.clean_ip.as_deref().unwrap_or(domain);
+        match ws_connect_once_port(
+            dial_target,
+            route.port,
+            domain,
+            path,
+            fast_timeout,
+            None,
+            route.secure,
+        )
+        .await
+        {
+            Ok(ws) => {
+                return (
+                    Some(ws),
+                    route.clean_ip.unwrap_or_default(),
+                    None,
+                );
+            }
+            Err(e) => {
+                if is_http_status_error(&e, 429) {
+                    return (None, String::new(), Some(e));
+                }
+                // Кешированный маршрут перестал отвечать — сбрасываем и переходим к полному перебору
+                clear_cf_fast_route();
+            }
+        }
+    }
+
+    // 2. Стандартная попытка: сначала по имени хоста, затем по IP из DoH
     let host_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
-    match ws_connect_once(domain, domain, path, host_timeout).await {
+    let (resolved_ip, primary_err) = match ws_connect_once(domain, domain, path, host_timeout).await
+    {
         Ok(ws) => return (Some(ws), String::new(), None),
         Err(host_err) => {
             if is_http_status_error(&host_err, 429) {
                 return (None, String::new(), Some(host_err));
             }
             let resolved_ip = resolve_doh(domain).await.unwrap_or_default();
-            if resolved_ip.is_empty() {
+            if !resolved_ip.is_empty() {
+                ldebug!(" CF DNS {} -> {}", domain, resolved_ip);
+                let ip_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
+                match ws_connect_once(&resolved_ip, domain, path, ip_timeout).await {
+                    Ok(ws) => return (Some(ws), resolved_ip, None),
+                    Err(ip_err) => {
+                        if is_http_status_error(&ip_err, 429) {
+                            return (None, resolved_ip, Some(ip_err));
+                        }
+                        (resolved_ip, ip_err)
+                    }
+                }
+            } else {
                 ldebug!(" CF DNS {} -> no result", domain);
-                return (None, String::new(), Some(host_err));
-            }
-            ldebug!(" CF DNS {} -> {}", domain, resolved_ip);
-            let ip_timeout = new_timed_attempt_timeout(phase_timeout, phase_timeout);
-            match ws_connect_once(&resolved_ip, domain, path, ip_timeout).await {
-                Ok(ws) => (Some(ws), resolved_ip, None),
-                Err(e) => (None, resolved_ip, Some(e)),
+                (String::new(), host_err)
             }
         }
+    };
+
+    // 3. Мобильный фоллбэк: если стандартный порт/IP заблокирован ТСПУ (Timeout или Io reset),
+    // запускаем параллельную гонку по альтернативным портам CF (2052, 8080, 443, 8443) и чистым Anycast IP!
+    if matches!(primary_err, WsError::Timeout | WsError::Io(_)) {
+        if let Some((ws, winning_ip, winning_route)) =
+            race_cf_mobile_endpoints(domain, path, &resolved_ip, phase_timeout).await
+        {
+            linfo!(
+                " CF mobile bypass ok: {} via {}:{} (tls={})",
+                domain,
+                winning_ip,
+                winning_route.port,
+                winning_route.secure
+            );
+            *CF_FAST_ROUTE.write() = Some(winning_route);
+            return (Some(ws), winning_ip, None);
+        }
     }
+
+    (None, resolved_ip, Some(primary_err))
 }
 
 pub fn log_cf_conn_error(msg: &str, err: &WsError) {
@@ -626,4 +860,27 @@ pub fn log_cf_conn_error(msg: &str, err: &WsError) {
 // активный домен set/save
 pub fn set_active_domain_and_save(_chosen: &str) {
     // Больше не используется для файлов. Балансер обновляется внутри proxy.rs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_cf_domain_builtin_and_custom() {
+        // Встроенный кодированный домен должен декодироваться в .co.uk
+        let builtin = normalize_cf_domain(CFPROXY_ENC[0]);
+        assert!(builtin.ends_with(".co.uk"), "got {}", builtin);
+
+        // Любой пользовательский домен (.com, .ru, .workers.dev) должен сохраняться как есть
+        assert_eq!(normalize_cf_domain("my-proxy.example.com"), "my-proxy.example.com");
+        assert_eq!(normalize_cf_domain("tg.my-domain.ru"), "tg.my-domain.ru");
+        assert_eq!(
+            normalize_cf_domain("https://tg-ws.user.workers.dev/apiws"),
+            "tg-ws.user.workers.dev"
+        );
+        assert!(is_worker_style_domain("tg-ws.user.workers.dev"));
+        assert!(is_worker_style_domain("my-app.pages.dev"));
+        assert!(!is_worker_style_domain("my-domain.ru"));
+    }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 enum ProxyMode {
     case loopback
@@ -24,14 +25,22 @@ protocol ProxyEngine: AnyObject {
 final class LoopbackEngine: ProxyEngine {
     let mode: ProxyMode = .loopback
     let runsInBackground = false
+    private var pathMonitor: NWPathMonitor?
+    private let monitorQueue = DispatchQueue(label: "TgWsProxy.LoopbackPathMonitor")
+    private var lastInterfaceSignature: String?
 
     func start(_ configuration: ProxyConfiguration) async -> Int32 {
-        await Task.detached(priority: .userInitiated) {
+        let code = await Task.detached(priority: .userInitiated) {
             NativeProxy.start(configuration: configuration)
         }.value
+        if code == 0 {
+            startNetworkMonitor()
+        }
+        return code
     }
 
     func stop() async {
+        stopNetworkMonitor()
         await Task.detached(priority: .userInitiated) {
             NativeProxy.stop()
         }.value
@@ -44,6 +53,26 @@ final class LoopbackEngine: ProxyEngine {
         return ProxyStats(rawValue: raw)
     }
 
+    private func startNetworkMonitor() {
+        stopNetworkMonitor()
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self, path.status == .satisfied else { return }
+            let sig = path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
+            if let prev = self.lastInterfaceSignature, !prev.isEmpty, prev != sig {
+                NativeProxy.notifyNetworkChanged()
+            }
+            self.lastInterfaceSignature = sig
+        }
+        pathMonitor = monitor
+        monitor.start(queue: monitorQueue)
+    }
+
+    private func stopNetworkMonitor() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        lastInterfaceSignature = nil
+    }
 }
 
 enum ProxyEngineFactory {

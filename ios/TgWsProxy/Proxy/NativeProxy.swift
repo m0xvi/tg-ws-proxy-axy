@@ -57,6 +57,14 @@ enum NativeProxy {
         _ = StopProxy()
     }
 
+    static func setDpiFragmentation(_ enabled: Bool) {
+        SetDpiFragmentation(enabled ? 1 : 0)
+    }
+
+    static func notifyNetworkChanged() {
+        NotifyNetworkChanged()
+    }
+
     static func stats() -> String {
         guard let pointer = GetStats() else { return "" }
         defer { FreeString(pointer) }

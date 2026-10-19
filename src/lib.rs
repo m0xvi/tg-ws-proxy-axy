@@ -218,7 +218,7 @@ pub unsafe extern "C" fn SetCfProxyCacheDir(c_cache_dir: *const c_char) {
 }
 
 /// # Safety
-/// `c_user_domain` — валидная C-строка или null (можно списком через , ; пробел).
+/// `c_user_domain` — валидная C-строка или null (можно списком через , ; пробел или URL).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetCfProxyConfig(
     enabled: c_int,
@@ -227,16 +227,42 @@ pub unsafe extern "C" fn SetCfProxyConfig(
 ) {
     CFPROXY_ENABLED.store(enabled != 0, Ordering::Relaxed);
     let user_domain = cstr_to_string(c_user_domain);
-    // Поддержка нескольких доменов как --cfproxy-domain (repeatable).
+    // Поддержка нескольких доменов как --cfproxy-domain (repeatable) и очистка URL-схем.
     let list = coerce_domain_list_str(&user_domain);
-    let mut cfg = CFPROXY.write();
-    cfg.user_domain = user_domain.trim().to_string();
     if !list.is_empty() {
+        let mut cfg = CFPROXY.write();
+        cfg.user_domain = list[0].clone();
         cfg.domains = list.clone();
         cfg.active = list[0].clone();
         crate::balancer::BALANCER
             .write()
             .update_domains_list(&cfg.domains);
+    } else {
+        CFPROXY.write().user_domain.clear();
+        cfproxy::init_cfproxy_domains();
+    }
+}
+
+/// Включает/выключает DPI-фрагментацию TLS ClientHello и HTTP Host для мобильных сетей.
+#[unsafe(no_mangle)]
+pub extern "C" fn SetDpiFragmentation(v: c_int) {
+    DPI_FRAGMENTATION.store(v != 0, Ordering::Relaxed);
+}
+
+/// Уведомляет прокси о смене сетевого интерфейса (Wi-Fi <-> Mobile Data):
+/// сбрасывает кеши DNS/маршрутов, блэклисты и пересоздаёт пулы соединений.
+#[unsafe(no_mangle)]
+pub extern "C" fn NotifyNetworkChanged() {
+    proxy::notify_network_changed();
+    let pools_opt = state_cell().lock().as_ref().map(|s| s.pools.clone());
+    if let Some(pools) = pools_opt {
+        runtime().spawn(async move {
+            pools.reset().await;
+            let map = DC_OPT.read().clone();
+            if !map.is_empty() {
+                pools.warmup(&map).await;
+            }
+        });
     }
 }
 

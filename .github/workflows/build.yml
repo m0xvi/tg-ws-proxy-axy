@@ -22,8 +22,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Check Rust Core
-        run: cargo check --manifest-path Cargo.toml --locked
+      - name: Check & Test Rust Core
+        run: |
+          cargo check --manifest-path Cargo.toml --locked
+          cargo test --manifest-path Cargo.toml --release --lib
 
       - name: FFI Smoke Test
         run: ./scripts/run-ffi-smoke.sh

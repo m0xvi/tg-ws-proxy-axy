@@ -56,6 +56,32 @@ pub const WS_POOL_REFILL_BACKOFF_MAX: f64 = 3600.0;
 pub const WS_POOL_CONNECT_TIMEOUT: f64 = 8.0;
 pub const WS_POOL_FRONTING_TIMEOUT: f64 = 7.0;
 pub const FRONTING_SNI: &str = "sprinthost.ru";
+pub static FRONTING_SNIS: &[&str] = &[
+    "sprinthost.ru",
+    "selectel.ru",
+    "reg.ru",
+    "timeweb.com",
+    "vk.com",
+    "ya.ru",
+];
+
+/// Официально поддерживаемые Cloudflare порты для HTTP (ws://) и HTTPS (wss://).
+pub static CF_HTTP_PORTS: &[u16] = &[80, 2052, 2082, 8080, 8880, 2086, 2095];
+pub static CF_HTTPS_PORTS: &[u16] = &[443, 8443, 2053, 2083, 2087, 2096];
+
+/// "Чистые" Anycast Edge IP Cloudflare из разных подсетей (IPv4 и IPv6)
+/// для обхода блокировки дефолтных диапазонов 104.21.0.0/16 и 172.67.0.0/16 на мобильных сетях.
+pub static CF_CLEAN_IPS: &[&str] = &[
+    "104.16.132.229",
+    "104.17.147.22",
+    "104.18.32.47",
+    "104.19.192.29",
+    "162.159.135.42",
+    "172.64.155.141",
+    "198.41.209.102",
+    "2606:4700::6810:84e5",
+    "2606:4700:4700::1111",
+];
 
 // proxy/pool.py::_CfWorkerPool
 pub const CF_WORKER_POOL_MAX_AGE: f64 = 100.0;
@@ -83,6 +109,7 @@ pub static POOL_SIZE: AtomicI32 = AtomicI32::new(DEFAULT_POOL_SZ);
 pub static LOG_VERBOSE: AtomicBool = AtomicBool::new(false);
 // proxy/config.py::ProxyConfig — мобильные эквиваленты
 pub static DISABLE_SECURE: AtomicBool = AtomicBool::new(true);
+pub static DPI_FRAGMENTATION: AtomicBool = AtomicBool::new(true);
 pub static FORCE_TEST_DC: AtomicBool = AtomicBool::new(false);
 pub static PROXY_PROTOCOL: AtomicBool = AtomicBool::new(false);
 
@@ -279,21 +306,41 @@ pub fn normalize_domain_pool(domains: &[String]) -> Vec<String> {
     out
 }
 
+/// Очищает пользовательский ввод домена от схемы (https://, wss://), пути и порта.
+pub fn clean_domain_input(raw: &str) -> String {
+    let mut s = raw.trim();
+    for prefix in ["https://", "http://", "wss://", "ws://"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest;
+            break;
+        }
+    }
+    if let Some((host_port, _)) = s.split_once('/') {
+        s = host_port;
+    }
+    if let Some((host_port, _)) = s.split_once('?') {
+        s = host_port;
+    }
+    if let Some((host, _)) = s.split_once(':') {
+        s = host;
+    }
+    s.trim().trim_end_matches('.').to_lowercase()
+}
+
 /// proxy/config.py::coerce_domain_list — строка или список через , ; пробелы.
 pub fn coerce_domain_list_str(value: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
     for item in value.replace(',', " ").replace(';', " ").split_whitespace() {
-        let item = item.trim();
-        if item.is_empty() {
+        let cleaned = clean_domain_input(item);
+        if cleaned.is_empty() || !is_valid_domain(&cleaned) {
             continue;
         }
-        let key = item.to_lowercase();
-        if seen.contains(&key) {
+        if seen.contains(&cleaned) {
             continue;
         }
-        seen.insert(key);
-        result.push(item.to_string());
+        seen.insert(cleaned.clone());
+        result.push(cleaned);
     }
     result
 }

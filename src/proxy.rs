@@ -647,17 +647,15 @@ impl CfWorkerPool {
         fallback_dst: String,
         dc: i32,
     ) -> Option<(RawWebSocket, String)> {
-        let secure = !DISABLE_SECURE.load(Ordering::Relaxed);
         let query = format!("dst={}&dc={}", fallback_dst, dc);
         let path = format!("/apiws?{}", query);
         for worker_domain in self.available_domains(worker_domains).await {
-            match ws_connect_full_opts(&worker_domain, &worker_domain, &path, 8.0, None, Some(secure))
-                .await
-            {
-                Ok(ws) => return Some((ws, worker_domain)),
-                Err(exc) => {
-                    self.report_failure(&worker_domain, &exc).await;
-                }
+            let (ws_opt, _, err_opt) = cf_connect_domain(&worker_domain, &path, 8.0).await;
+            if let Some(ws) = ws_opt {
+                return Some((ws, worker_domain));
+            }
+            if let Some(exc) = err_opt {
+                self.report_failure(&worker_domain, &exc).await;
             }
         }
         None
@@ -1223,11 +1221,68 @@ async fn try_cfproxy_base_domain(
         None => return (None, String::new()),
     };
 
+    let is_user_domain = {
+        let ud = CFPROXY.read().user_domain.clone();
+        !ud.is_empty() && ud.eq_ignore_ascii_case(&base_domain)
+    };
+
+    // Если домен имеет вид Cloudflare Worker / Pages / Serverless (.workers.dev, .pages.dev и т.д.),
+    // сразу подключаемся к нему напрямую с параметрами ?dst=...&dc=... (протокол CfWorker).
+    if is_worker_style_domain(&base_domain) {
+        let fallback_dst = resolve_fallback_target(dc, false, false);
+        let worker_path = if fallback_dst.is_empty() {
+            ws_path.to_string()
+        } else {
+            format!("{}?dst={}&dc={}", ws_path, fallback_dst, dc)
+        };
+        ldebug!(" CF worker-style try {} ({})", base_domain, worker_path);
+        let (ws, resolved_ip, err) = cf_connect_domain(&base_domain, &worker_path, 5.0).await;
+        if let Some(e) = err {
+            if is_http_status_error(&e, 429) {
+                mark_cfproxy_429_cooldown(&base_domain, &e);
+            }
+            log_cf_conn_error(
+                &format!(" CF worker-style fail {}: {}", base_domain, e.compact()),
+                &e,
+            );
+            return (None, String::new());
+        }
+        clear_cfproxy_429_cooldown(&base_domain);
+        if !resolved_ip.is_empty() {
+            ldebug!(" CF worker-style ok {} via {}", base_domain, resolved_ip);
+        }
+        return (ws, base_domain);
+    }
+
     let domain = format!("kws{}.{}", dc, base_domain);
     ldebug!(" CF try {}", domain);
 
     let (ws, resolved_ip, err) = cf_connect_domain(&domain, ws_path, 5.0).await;
     if let Some(e) = err {
+        // Если пользователь ввёл собственный домен, который настроен как единый Worker/Reverse-Proxy
+        // без поддоменов kws1..5, автоматически пробуем корневой домен с ?dst=...&dc=...
+        if is_user_domain && !is_http_status_error(&e, 429) {
+            let fallback_dst = resolve_fallback_target(dc, false, false);
+            let worker_path = if fallback_dst.is_empty() {
+                ws_path.to_string()
+            } else {
+                format!("{}?dst={}&dc={}", ws_path, fallback_dst, dc)
+            };
+            ldebug!(
+                " CF user domain fallback to root {} ({})",
+                base_domain,
+                worker_path
+            );
+            let (w_ws, w_ip, w_err) = cf_connect_domain(&base_domain, &worker_path, 5.0).await;
+            if w_err.is_none() && w_ws.is_some() {
+                clear_cfproxy_429_cooldown(&base_domain);
+                if !w_ip.is_empty() {
+                    ldebug!(" CF root domain ok {} via {}", base_domain, w_ip);
+                }
+                return (w_ws, base_domain);
+            }
+        }
+
         // Cooldown ставим ТОЛЬКО при HTTP 429, иначе любой reset/timeout
         // выжигал бы домены и плодил лавину cooldown.
         if is_http_status_error(&e, 429) {
@@ -1385,7 +1440,6 @@ where
             );
             Some(ws)
         } else {
-            let secure = !DISABLE_SECURE.load(Ordering::Relaxed);
             let query = format!("dst={}&dc={}", fallback_dst, dc);
             let path = format!("/apiws?{}", query);
             let mut found = None;
@@ -1394,27 +1448,17 @@ where
                     "[{}] DC{}{} -> trying CF worker {} for {}",
                     label, dc, m_tag, worker_domain, fallback_dst
                 );
-                match ws_connect_full_opts(
-                    &worker_domain,
-                    &worker_domain,
-                    &path,
-                    10.0,
-                    None,
-                    Some(secure),
-                )
-                .await
-                {
-                    Ok(ws) => {
-                        found = Some(ws);
-                        break;
-                    }
-                    Err(exc) => {
-                        pools.cf_worker.report_failure(&worker_domain, &exc).await;
-                        lwarn!(
-                            "[{}] DC{}{} CF worker {} failed: {}",
-                            label, dc, m_tag, worker_domain, exc.compact()
-                        );
-                    }
+                let (ws_opt, _, err_opt) = cf_connect_domain(&worker_domain, &path, 10.0).await;
+                if let Some(ws) = ws_opt {
+                    found = Some(ws);
+                    break;
+                }
+                if let Some(exc) = err_opt {
+                    pools.cf_worker.report_failure(&worker_domain, &exc).await;
+                    lwarn!(
+                        "[{}] DC{}{} CF worker {} failed: {}",
+                        label, dc, m_tag, worker_domain, exc.compact()
+                    );
                 }
             }
             found
@@ -1872,7 +1916,16 @@ async fn serve_core<R, W>(
         for domain in &domains {
             let url = format!("wss://{}{} via {}", domain, ws_path, target);
             linfo!("[{}] DC{}{} -> {}", label, dc, m_tag, url);
-            match ws_connect_full_opts(&target, domain, ws_path, ws_timeout, None, None).await {
+            // ВАЖНО: прямое подключение к Telegram DC (kws*.web.telegram.org) ВСЕГДА требует TLS (Some(true)),
+            // даже если DISABLE_SECURE включён для Cloudflare! Также поддерживаем SNI-fronting фоллбэк.
+            if ws_pool_fronting_first() {
+                if let Some(ws) = connect_fronted(&target, domain, ws_path).await {
+                    all_redirects = false;
+                    ws_opt = Some(ws);
+                    break;
+                }
+            }
+            match ws_connect_full_opts(&target, domain, ws_path, ws_timeout, None, Some(true)).await {
                 Ok(ws) => {
                     all_redirects = false;
                     ws_opt = Some(ws);
@@ -1902,6 +1955,13 @@ async fn serve_core<R, W>(
                     continue;
                 }
                 Err(WsError::Timeout) => {
+                    if !ws_pool_fronting_first() {
+                        if let Some(ws) = connect_fronted(&target, domain, ws_path).await {
+                            all_redirects = false;
+                            ws_opt = Some(ws);
+                            break;
+                        }
+                    }
                     STATS.ws_errors.fetch_add(1, Ordering::Relaxed);
                     ws_timed_out = true;
                     lwarn!(
@@ -1911,6 +1971,13 @@ async fn serve_core<R, W>(
                     break;
                 }
                 Err(exc) => {
+                    if !ws_pool_fronting_first() {
+                        if let Some(ws) = connect_fronted(&target, domain, ws_path).await {
+                            all_redirects = false;
+                            ws_opt = Some(ws);
+                            break;
+                        }
+                    }
                     STATS.ws_errors.fetch_add(1, Ordering::Relaxed);
                     all_redirects = false;
                     lwarn!(
@@ -2093,7 +2160,12 @@ pub async fn connect_direct_ws(
     let mut all_redirects = true;
 
     for dom in domains {
-        match ws_connect_full_opts(target, dom, ws_path, timeout, None, None).await {
+        if ws_pool_fronting_first() {
+            if let Some(ws) = connect_fronted(target, dom, ws_path).await {
+                return (Some(ws), ws_failed_redirect, false);
+            }
+        }
+        match ws_connect_full_opts(target, dom, ws_path, timeout, None, Some(true)).await {
             Ok(ws) => return (Some(ws), ws_failed_redirect, false),
             Err(WsError::Handshake(h)) => {
                 STATS.ws_errors.fetch_add(1, Ordering::Relaxed);
@@ -2104,17 +2176,54 @@ pub async fn connect_direct_ws(
                 }
             }
             Err(WsError::Timeout) => {
+                if !ws_pool_fronting_first() {
+                    if let Some(ws) = connect_fronted(target, dom, ws_path).await {
+                        return (Some(ws), ws_failed_redirect, false);
+                    }
+                }
                 // Как в оригинале: таймаут прерывает перебор, all_redirects не трогаем.
                 STATS.ws_errors.fetch_add(1, Ordering::Relaxed);
                 break;
             }
             Err(_) => {
+                if !ws_pool_fronting_first() {
+                    if let Some(ws) = connect_fronted(target, dom, ws_path).await {
+                        return (Some(ws), ws_failed_redirect, false);
+                    }
+                }
                 STATS.ws_errors.fetch_add(1, Ordering::Relaxed);
                 all_redirects = false;
             }
         }
     }
     (None, ws_failed_redirect, all_redirects)
+}
+
+static ACTIVE_POOLS: once_cell::sync::Lazy<parking_lot::RwLock<Option<Arc<ProxyPools>>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(None));
+
+/// Вызывается при смене сети (Wi-Fi <-> Mobile Data / смена БС):
+/// сбрасывает кулдауны, блэклисты, DoH-кеш, быстрые CF-маршруты и обновляет пулы соединений.
+pub fn notify_network_changed() {
+    WS_BLACKLIST.write().clear();
+    DC_FAIL_UNTIL.write().clear();
+    IP_FAIL_UNTIL.write().clear();
+    CFPROXY_429.write().clear();
+    crate::cfproxy::clear_doh_cache();
+    crate::cfproxy::clear_cf_fast_route();
+    linfo!(" Сеть изменилась: сброшены кеши DNS/маршрутов и кулдауны DC");
+
+    if let Some(pools) = ACTIVE_POOLS.read().clone() {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                pools.reset().await;
+                let map = DC_OPT.read().clone();
+                if !map.is_empty() {
+                    pools.warmup(&map).await;
+                }
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2133,6 +2242,7 @@ pub async fn run_proxy(
         let mut m = DC_OPT.write();
         *m = dc_opt_map.clone();
     }
+    *ACTIVE_POOLS.write() = Some(pools.clone());
 
     start_cfproxy_refresh();
 

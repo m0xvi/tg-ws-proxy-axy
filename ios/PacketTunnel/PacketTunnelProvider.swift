@@ -1,6 +1,11 @@
+import Network
 import NetworkExtension
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {
+
+    private var pathMonitor: NWPathMonitor?
+    private let monitorQueue = DispatchQueue(label: "TgWsProxy.TunnelPathMonitor")
+    private var lastInterfaceSignature: String?
 
     override func startTunnel(
         options: [String: NSObject]?,
@@ -26,9 +31,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.ipv4Settings = ipv4
         settings.mtu = 1500
 
-        setTunnelNetworkSettings(settings) { error in
+        setTunnelNetworkSettings(settings) { [weak self] error in
             if error != nil {
                 NativeProxy.stop()
+            } else {
+                self?.startNetworkMonitor()
             }
             completionHandler(error)
         }
@@ -38,8 +45,33 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         with reason: NEProviderStopReason,
         completionHandler: @escaping () -> Void
     ) {
+        stopNetworkMonitor()
         NativeProxy.stop()
         completionHandler()
+    }
+
+    private func startNetworkMonitor() {
+        stopNetworkMonitor()
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self, path.status == .satisfied else { return }
+            let sig = path.availableInterfaces
+                .filter { $0.type != .other }
+                .map { "\($0.type):\($0.name)" }
+                .joined(separator: ",")
+            if let prev = self.lastInterfaceSignature, !prev.isEmpty, prev != sig {
+                NativeProxy.notifyNetworkChanged()
+            }
+            self.lastInterfaceSignature = sig
+        }
+        pathMonitor = monitor
+        monitor.start(queue: monitorQueue)
+    }
+
+    private func stopNetworkMonitor() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        lastInterfaceSignature = nil
     }
 
     override func handleAppMessage(

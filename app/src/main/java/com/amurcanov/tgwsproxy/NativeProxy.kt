@@ -18,6 +18,8 @@ interface ProxyLibrary : Library {
     fun SetCfWorkerDomains(domains: String)
     fun SetFakeTlsDomain(domain: String)
     fun SetDisableSecure(v: Int)
+    fun SetDpiFragmentation(v: Int)
+    fun NotifyNetworkChanged()
     fun SetForceTestDc(v: Int)
     fun SetProxyProtocol(v: Int)
     fun SetSecret(secret: String)
@@ -67,6 +69,14 @@ object NativeProxy {
 
     fun setDisableSecure(v: Boolean) {
         ProxyLibrary.INSTANCE.SetDisableSecure(if (v) 1 else 0)
+    }
+
+    fun setDpiFragmentation(v: Boolean) {
+        ProxyLibrary.INSTANCE.SetDpiFragmentation(if (v) 1 else 0)
+    }
+
+    fun notifyNetworkChanged() {
+        ProxyLibrary.INSTANCE.NotifyNetworkChanged()
     }
 
     fun setForceTestDc(v: Boolean) {

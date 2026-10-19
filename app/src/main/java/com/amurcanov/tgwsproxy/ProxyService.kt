@@ -7,6 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -26,6 +29,9 @@ class ProxyService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var statsJob: Job? = null
     private var restartJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastNetworkHandle: Long = 0L
+    private var lastTransportMask: Int = 0
     private var lastNotificationContent: String = ""
     private var lastNotificationAtMs: Long = 0L
     private var notificationStartedAtMs: Long = 0L
@@ -186,6 +192,7 @@ class ProxyService : Service() {
                         if (!stopInProgress) {
                             updateRunningState(true)
                             _isVerifiedRunning.value = true
+                            registerNetworkMonitor()
                             updateNotification(getString(R.string.notification_running), force = true)
                             Log.i(TAG, "Proxy ready: listening on port $port")
                         }
@@ -322,6 +329,7 @@ class ProxyService : Service() {
     private fun stopProxy() {
         if (stopInProgress) return
         stopInProgress = true
+        unregisterNetworkMonitor()
         restartJob?.cancel()
         restartJob = null
         statsJob?.cancel()
@@ -500,7 +508,69 @@ class ProxyService : Service() {
             .build()
     }
 
+    private fun registerNetworkMonitor() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return
+        unregisterNetworkMonitor()
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val handle = network.networkHandle
+                    if (lastNetworkHandle != 0L && lastNetworkHandle != handle && _isRunning.value) {
+                        Log.i(TAG, "Default network switched ($lastNetworkHandle -> $handle), resetting proxy pools")
+                        serviceScope.launch {
+                            try {
+                                NativeProxy.notifyNetworkChanged()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "notifyNetworkChanged failed", e)
+                            }
+                        }
+                    }
+                    lastNetworkHandle = handle
+                }
+
+                override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                    var mask = 0
+                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) mask = mask or 1
+                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) mask = mask or 2
+                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) mask = mask or 4
+                    if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) mask = mask or 8
+                    if (lastTransportMask != 0 && mask != 0 && lastTransportMask != mask && _isRunning.value) {
+                        Log.i(TAG, "Network transport changed ($lastTransportMask -> $mask), resetting proxy pools")
+                        serviceScope.launch {
+                            try {
+                                NativeProxy.notifyNetworkChanged()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "notifyNetworkChanged failed", e)
+                            }
+                        }
+                    }
+                    if (mask != 0) {
+                        lastTransportMask = mask
+                    }
+                }
+            }
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register network callback", e)
+        }
+    }
+
+    private fun unregisterNetworkMonitor() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        lastNetworkHandle = 0L
+        lastTransportMask = 0
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as? ConnectivityManager
+            cm?.unregisterNetworkCallback(cb)
+        } catch (_: Exception) {
+        }
+    }
+
     override fun onDestroy() {
+        unregisterNetworkMonitor()
         restartJob?.cancel()
         restartJob = null
         statsJob?.cancel()
