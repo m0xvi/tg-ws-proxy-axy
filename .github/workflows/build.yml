@@ -31,11 +31,13 @@ jobs:
 
       - name: Check & Test Rust Core
         run: |
-          cargo check --manifest-path Cargo.toml --locked
+          cargo check --manifest-path Cargo.toml
           cargo test --manifest-path Cargo.toml --release --lib
 
       - name: FFI Smoke Test
-        run: ./scripts/run-ffi-smoke.sh
+        run: |
+          chmod +x ./scripts/run-ffi-smoke.sh
+          ./scripts/run-ffi-smoke.sh
 
   android:
     name: Android APK (arm64 + arm32 + universal)
@@ -47,31 +49,29 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK
-        run: sdkmanager --install "ndk;27.0.12077973"
+      - name: Ensure Android NDK is installed
+        run: |
+          if [ -z "${ANDROID_NDK_LATEST_HOME:-}" ] || [ ! -d "${ANDROID_NDK_LATEST_HOME:-}" ]; then
+            sdkmanager --install "ndk;27.0.12077973"
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
-
       - name: Build Rust Core (.so) for Android
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
         run: |
           chmod +x ./scripts/build-rust-android.sh
           ./scripts/build-rust-android.sh
 
-      - name: Build Release APKs (signed with debug/release config)
+      - name: Build Release APKs (signed)
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleRelease
+          ./gradlew assembleRelease --no-daemon
           mkdir -p dist-android
           find app/build/outputs/apk -name "*.apk" -exec cp {} dist-android/ \;
           ls -lh dist-android/
@@ -80,10 +80,11 @@ jobs:
         with:
           name: android-apks
           path: dist-android/*.apk
+          if-no-files-found: error
 
   ios:
     name: iOS IPA (free + vpn)
-    runs-on: macos-14
+    runs-on: macos-15
     needs: core
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +104,7 @@ jobs:
         with:
           name: ios-ipas
           path: dist/*.ipa
+          if-no-files-found: error
 
   release:
     name: Publish GitHub Release

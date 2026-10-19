@@ -11,7 +11,6 @@ mkdir -p "$BUILD_DIR"
 
 CARGO_TARGET_DIR="$BUILD_DIR/target" cargo rustc \
   --manifest-path "$MANIFEST_PATH" \
-  --locked \
   --lib \
   --release \
   -- \

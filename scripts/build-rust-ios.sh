@@ -82,7 +82,6 @@ for ARCHITECTURE in $(requested_architectures); do
     --manifest-path "$MANIFEST_PATH" \
     --target "$RUST_TARGET" \
     --release \
-    --locked \
     --lib \
     -- \
     --crate-type=staticlib
