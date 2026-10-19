@@ -193,9 +193,9 @@ fun MainContent(settingsStore: SettingsStore) {
     val safeBottomInset = with(density) { WindowInsets.safeDrawing.getBottom(density).toDp() }
     val navOverlayReserve = safeBottomInset + 96.dp
 
-    DisposableEffect(Unit) {
+    LaunchedEffect(Unit) {
         LogManager.startListening()
-        onDispose { LogManager.stopListening() }
+        LogManager.syncFromNative()
     }
 
     LaunchedEffect(updateCheckIntervalHours, updateLastCheckAt) {
@@ -349,7 +349,6 @@ fun MainContent(settingsStore: SettingsStore) {
                         action = UPDATE_DIALOG_ACTION_UPDATE,
                         actedAt = System.currentTimeMillis()
                     )
-                    openUrlInBrowser(context, release.releaseUrl)
                 }
             }
         )
@@ -591,98 +590,136 @@ private fun AppBackdrop(modifier: Modifier = Modifier) {
  * - Duplicate merging: last-entry count increment done in-place conceptually
  */
 object LogManager {
-    val logs = MutableStateFlow<List<LogEntry>>(emptyList())
+    private val kotlinEntries = java.util.concurrent.CopyOnWriteArrayList<LogEntry>()
+    val logs = MutableStateFlow<List<LogEntry>>(
+        listOf(
+            LogEntry(
+                key = "init_0",
+                message = "Журнал событий TG WS Proxy AXY активен",
+                count = 1,
+                isError = false,
+                priority = 4,
+                isEssential = true
+            )
+        )
+    )
     private var job: Job? = null
-    private val nextKey = AtomicLong(0)
-
-    private val logChannel = Channel<LogEntry>(capacity = BUFFERED)
+    private val nextKey = AtomicLong(1)
 
     fun appendKotlinLog(message: String, priority: Int = 4) {
-        val entry = createEntry(message, priority) ?: return
-        logChannel.trySend(entry)
+        val entry = createEntry(message, priority, count = 1, keyOverride = null) ?: return
+        synchronized(kotlinEntries) {
+            val lastIdx = kotlinEntries.lastIndex
+            if (lastIdx >= 0 && kotlinEntries[lastIdx].message == entry.message) {
+                val prev = kotlinEntries[lastIdx]
+                kotlinEntries[lastIdx] = prev.copy(count = prev.count + 1)
+            } else {
+                if (kotlinEntries.size >= 50) {
+                    kotlinEntries.removeAt(0)
+                }
+                kotlinEntries.add(entry)
+            }
+        }
+        syncFromNative()
+    }
+
+    fun syncFromNative() {
+        try {
+            val combined = ArrayDeque<LogEntry>(160)
+            synchronized(kotlinEntries) {
+                combined.addAll(kotlinEntries)
+            }
+
+            val rawNative = NativeProxy.drainLogs()
+            if (!rawNative.isNullOrEmpty()) {
+                for (line in rawNative.lineSequence()) {
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty()) continue
+                    val parts = trimmed.split('|', limit = 4)
+                    val entry = when (parts.size) {
+                        4 -> {
+                            val seq = parts[0]
+                            val prio = parts[1].toIntOrNull() ?: 4
+                            val cnt = parts[2].toIntOrNull() ?: 1
+                            val msg = parts[3]
+                            createEntry(msg, prio, count = cnt, keyOverride = "n_$seq")
+                        }
+                        2 -> {
+                            val prio = parts[0].toIntOrNull() ?: 4
+                            val msg = parts[1]
+                            createEntry(msg, prio, count = 1, keyOverride = null)
+                        }
+                        else -> createEntry(trimmed, 4, count = 1, keyOverride = null)
+                    }
+                    if (entry != null) {
+                        val last = combined.lastOrNull()
+                        if (last != null && last.message == entry.message && last.key.startsWith("k_")) {
+                            combined.removeLast()
+                        }
+                        combined.addLast(entry)
+                    }
+                }
+            }
+
+            if (combined.isEmpty()) {
+                combined.addLast(
+                    LogEntry(
+                        key = "init_0",
+                        message = "Журнал событий TG WS Proxy AXY активен",
+                        count = 1,
+                        isError = false,
+                        priority = 4,
+                        isEssential = true
+                    )
+                )
+            }
+
+            while (combined.size > 150) {
+                combined.removeFirst()
+            }
+            logs.value = combined.toList()
+        } catch (_: Throwable) {
+        }
     }
 
     fun startListening() {
         if (job?.isActive == true) return
         job = CoroutineScope(Dispatchers.IO).launch {
             while (isActive) {
-                val pendingBatch = mutableListOf<LogEntry>()
-
-                // 1. Забираем логи напрямую из памяти Rust-ядра (работает на 100% прошивок без logcat!)
-                val rawNative = NativeProxy.drainLogs()
-                if (!rawNative.isNullOrEmpty()) {
-                    for (line in rawNative.lineSequence()) {
-                        val trimmed = line.trim()
-                        if (trimmed.isEmpty()) continue
-                        val sep = trimmed.indexOf('|')
-                        val entry = if (sep > 0) {
-                            val prio = trimmed.substring(0, sep).toIntOrNull() ?: 4
-                            val msg = trimmed.substring(sep + 1)
-                            createEntry(msg, prio)
-                        } else {
-                            createEntry(trimmed, 4)
-                        }
-                        if (entry != null) {
-                            pendingBatch.add(entry)
-                        }
-                    }
-                }
-
-                // 2. Забираем логи со стороны Kotlin
-                var received = logChannel.tryReceive()
-                while (received.isSuccess) {
-                    pendingBatch.add(received.getOrThrow())
-                    if (pendingBatch.size >= 50) break
-                    received = logChannel.tryReceive()
-                }
-
-                if (pendingBatch.isNotEmpty()) {
-                    logs.value = applyBatch(logs.value, pendingBatch)
-                }
-
-                delay(200)
+                syncFromNative()
+                delay(250)
             }
         }
-    }
-
-    private fun applyBatch(current: List<LogEntry>, batch: List<LogEntry>): List<LogEntry> {
-        val result = ArrayDeque(current)
-        for (entry in batch) {
-            var merged = false
-            val searchDepth = minOf(result.size, 8)
-            for (i in result.indices.reversed().take(searchDepth)) {
-                if (result[i].message == entry.message) {
-                    val existing = result.removeAt(i)
-                    result.addLast(existing.copy(count = existing.count + 1))
-                    merged = true
-                    break
-                }
-            }
-            if (!merged) {
-                result.addLast(entry)
-            }
-        }
-        while (result.size > 120) {
-            result.removeFirst()
-        }
-        return result.toList()
     }
 
     fun stopListening() {
-        job?.cancel()
-        job = null
+        // Не останавливаем глобальный слушатель при пересоздании Composable
     }
 
     fun clearLogs() {
+        kotlinEntries.clear()
         NativeProxy.clearLogs()
-        logs.value = emptyList()
+        logs.value = listOf(
+            LogEntry(
+                key = "clear_${nextKey.getAndIncrement()}",
+                message = "Журнал очищен — ожидание новых событий",
+                count = 1,
+                isError = false,
+                priority = 4,
+                isEssential = true
+            )
+        )
     }
 
-    private fun createEntry(rawMsg: String, priority: Int): LogEntry? {
+    private fun createEntry(
+        rawMsg: String,
+        priority: Int,
+        count: Int = 1,
+        keyOverride: String? = null
+    ): LogEntry? {
         var msg = rawMsg.trim()
         if (msg.isEmpty() || msg.startsWith("━━━")) return null
 
-        // Срезаем динамические хвосты сессии (чтобы однотипные записи аккуратно группировались)
         if (msg.contains("WS session closed") && msg.contains(": ^")) {
             msg = msg.substringBefore(": ^").trim()
         }
@@ -690,13 +727,14 @@ object LogManager {
         val isError = priority >= 6
         val isEssential = listOf(
             "pool", "key:", "started", "address:", "error", "failed", "blocked", "CF",
-            "Пул", "Ключ:", "запущен", "Адрес:", "ошибка", "провалены", "заблокирован", "подключен", "сброшен"
+            "Пул", "Ключ:", "запущен", "Адрес:", "ошибка", "провалены", "заблокирован",
+            "подключен", "сброшен", "активен", "Журнал", "Ядро"
         ).any { marker -> msg.contains(marker, ignoreCase = true) }
 
         return LogEntry(
-            key = "log_${nextKey.getAndIncrement()}",
+            key = keyOverride ?: "k_${nextKey.getAndIncrement()}",
             message = msg,
-            count = 1,
+            count = count.coerceAtLeast(1),
             isError = isError,
             priority = priority,
             isEssential = isEssential

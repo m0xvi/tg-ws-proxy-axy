@@ -81,8 +81,17 @@ jobs:
 
       - name: Build Release APKs (signed)
         run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            RAW_TAG="${{ inputs.release_tag }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            RAW_TAG="${GITHUB_REF#refs/tags/}"
+          else
+            RAW_TAG="v2.0.${{ github.run_number }}"
+          fi
+          VER_NAME="${RAW_TAG#v}"
+          VER_CODE=$(( 200 + ${{ github.run_number }} ))
           chmod +x ./gradlew
-          sh ./gradlew assembleRelease --no-daemon
+          sh ./gradlew assembleRelease -PappVersionName="$VER_NAME" -PappVersionCode="$VER_CODE" --no-daemon
           mkdir -p dist-android
           find app/build/outputs/apk -name "*.apk" -exec cp {} dist-android/ \;
           ls -lh dist-android/

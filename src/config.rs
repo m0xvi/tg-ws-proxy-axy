@@ -43,8 +43,8 @@ pub const RESERVED_FIRST_BYTE: u8 = 0xEF;
 
 pub const BRIDGE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 pub const BRIDGE_PING_INTERVAL: Duration = Duration::from_secs(30);
-pub const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-pub const WS_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+pub const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(25);
+pub const WS_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 pub const WS_BRIDGE_CHUNK_SIZE: usize = 64 * 1024;
 pub const POOLED_FRAME_CAP: usize = WS_BRIDGE_CHUNK_SIZE + 32;
 
@@ -604,20 +604,42 @@ fn mask_domain(domain: &str) -> String {
         .join(".")
 }
 
-static NATIVE_LOG_RING: Lazy<parking_lot::Mutex<std::collections::VecDeque<String>>> =
-    Lazy::new(|| parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(256)));
+#[derive(Clone, Debug)]
+struct NativeLogRecord {
+    seq: u64,
+    prio: i32,
+    count: u32,
+    msg: String,
+}
 
+static NATIVE_LOG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+static NATIVE_LOG_RING: Lazy<parking_lot::Mutex<std::collections::VecDeque<NativeLogRecord>>> =
+    Lazy::new(|| {
+        let mut q = std::collections::VecDeque::with_capacity(160);
+        q.push_back(NativeLogRecord {
+            seq: 0,
+            prio: 4,
+            count: 1,
+            msg: "Ядро TG WS Proxy AXY инициализировано".to_string(),
+        });
+        parking_lot::Mutex::new(q)
+    });
+
+/// Возвращает полный актуальный снимок кольцевого буфера логов (без удаления элементов!).
+/// Это гарантирует, что при пересоздании MainActivity, фоновой работе сервиса или открытии
+/// вкладки «Логи» в любой момент времени все записи мгновенно отображаются в UI.
 pub fn drain_native_logs() -> String {
-    let mut ring = NATIVE_LOG_RING.lock();
+    let ring = NATIVE_LOG_RING.lock();
     if ring.is_empty() {
         return String::new();
     }
-    let mut out = String::with_capacity(ring.len() * 64);
-    while let Some(item) = ring.pop_front() {
+    let mut out = String::with_capacity(ring.len() * 72);
+    for item in ring.iter() {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&item);
+        out.push_str(&format!("{}|{}|{}|{}", item.seq, item.prio, item.count, item.msg));
     }
     out
 }
@@ -641,15 +663,48 @@ fn emit(prefix: &str, msg: &str) {
     } else {
         4
     };
-    let clean_msg = censored.replace('\n', " ").replace('\r', "");
-    let trimmed = clean_msg.trim();
-    if !trimmed.is_empty() {
-        let mut ring = NATIVE_LOG_RING.lock();
-        if ring.len() >= 250 {
-            ring.pop_front();
-        }
-        ring.push_back(format!("{}|{}", prio, trimmed));
+    let clean_msg = censored
+        .replace('\n', " ")
+        .replace('\r', "")
+        .replace('\0', "");
+    let mut trimmed = clean_msg.trim();
+    if trimmed.is_empty() || trimmed.starts_with("━━━") {
+        return;
     }
+    if trimmed.contains("WS session closed") {
+        if let Some((before, _)) = trimmed.split_once(": ^") {
+            trimmed = before.trim();
+        }
+    }
+
+    let seq = NATIVE_LOG_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut ring = NATIVE_LOG_RING.lock();
+    let len = ring.len();
+    let search_start = len.saturating_sub(8);
+    let mut merged_idx = None;
+    for idx in (search_start..len).rev() {
+        if ring[idx].msg == trimmed {
+            merged_idx = Some(idx);
+            break;
+        }
+    }
+    if let Some(idx) = merged_idx {
+        if let Some(mut existing) = ring.remove(idx) {
+            existing.count = existing.count.saturating_add(1);
+            existing.prio = prio;
+            ring.push_back(existing);
+            return;
+        }
+    }
+    if ring.len() >= 150 {
+        ring.pop_front();
+    }
+    ring.push_back(NativeLogRecord {
+        seq,
+        prio,
+        count: 1,
+        msg: trimmed.to_string(),
+    });
 }
 
 pub fn log_info(msg: &str) {

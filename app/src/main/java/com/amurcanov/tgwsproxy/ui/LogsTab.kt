@@ -42,6 +42,14 @@ fun LogsTab(settingsStore: SettingsStore) {
     val scope = rememberCoroutineScope()
     val currentLogs by LogManager.logs.collectAsStateWithLifecycle()
 
+    LaunchedEffect(Unit) {
+        LogManager.startListening()
+        while (true) {
+            LogManager.syncFromNative()
+            kotlinx.coroutines.delay(250)
+        }
+    }
+
     val savedInfo by settingsStore.logShowInfo.collectAsStateWithLifecycle(initialValue = SettingsStore.DEFAULT_LOG_SHOW_INFO)
     val savedError by settingsStore.logShowError.collectAsStateWithLifecycle(initialValue = SettingsStore.DEFAULT_LOG_SHOW_ERROR)
     val savedNull by settingsStore.logShowNull.collectAsStateWithLifecycle(initialValue = false)
@@ -57,12 +65,15 @@ fun LogsTab(settingsStore: SettingsStore) {
                 priority = 4,
                 isEssential = true
             ))
+        } else if (!savedInfo && !savedError) {
+            currentLogs
         } else {
-            currentLogs.filter { entry ->
+            val list = currentLogs.filter { entry ->
                 entry.isEssential ||
                 (savedInfo && entry.priority <= 4) ||
                 (savedError && entry.priority >= 5)
             }
+            list.ifEmpty { currentLogs }
         }
     }
 

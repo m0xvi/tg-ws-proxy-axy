@@ -93,7 +93,6 @@ class ProxyService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                LogManager.clearLogs()
                 val bindIp = intent.getStringExtra(EXTRA_BIND_IP) ?: "127.0.0.1"
                 val port = intent.getIntExtra(EXTRA_PORT, 1443)
                 val ips = intent.getStringExtra(EXTRA_IPS) ?: ""
@@ -192,6 +191,10 @@ class ProxyService : Service() {
             }
 
             try {
+                LogManager.appendKotlinLog(
+                    "Запуск прокси: $bindIp:$port (CF=${if (cfEnabled) "ON" else "OFF"}, DPI=${if (dpiFragmentation) "ON" else "OFF"})",
+                    4
+                )
                 NativeProxy.setPoolSize(poolSize)
                 NativeProxy.setDpiFragmentation(dpiFragmentation)
                 NativeProxy.setDisableSecure(disableSecure)
@@ -199,6 +202,8 @@ class ProxyService : Service() {
                 NativeProxy.setCfProxyConfig(cfEnabled, cfPriority, cfDomain)
                 val result = NativeProxy.startProxy(bindIp, port, ips, secretKey, 1)
                 if (result == 0) {
+                    LogManager.appendKotlinLog("Прокси запущен и слушает $bindIp:$port", 4)
+                    LogManager.syncFromNative()
                     serviceScope.launch {
                         if (!stopInProgress) {
                             updateRunningState(true)
@@ -209,6 +214,7 @@ class ProxyService : Service() {
                         }
                     }
                 } else {
+                    LogManager.appendKotlinLog("Ошибка запуска StartProxy: код $result", 6)
                     Log.e(TAG, "StartProxy returned error code: $result")
                     serviceScope.launch {
                         updateNotification(getString(R.string.notification_start_error_code, result), force = true)
@@ -217,6 +223,7 @@ class ProxyService : Service() {
                     }
                 }
             } catch (e: Throwable) {
+                LogManager.appendKotlinLog("Ошибка JNA: ${e.message ?: e.javaClass.simpleName}", 6)
                 Log.e(TAG, "Failed to start proxy via JNA", e)
                 serviceScope.launch {
                     updateNotification(getString(R.string.notification_error, e.message ?: ""), force = true)
@@ -245,6 +252,7 @@ class ProxyService : Service() {
                 delay(STATS_UPDATE_MS.milliseconds)
                 if (_isRunning.value && !stopInProgress) {
                     try {
+                        LogManager.syncFromNative()
                         val rawStats = NativeProxy.getStats() ?: continue
                         val upRaw = extractStat(rawStats, "up=")
                         val downRaw = extractStat(rawStats, "down=")

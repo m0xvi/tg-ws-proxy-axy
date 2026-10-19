@@ -102,13 +102,10 @@ import kotlinx.coroutines.launch
 private const val AndroidForkRepoUrl = "https://github.com/m0xvi/tg-ws-proxy-axy"
 private const val AndroidForkIssuesUrl = "https://github.com/m0xvi/tg-ws-proxy-axy/issues"
 private const val DeveloperProfileUrl = "https://github.com/m0xvi"
-private const val OriginalProjectUrl = "https://github.com/Flowseal/tg-ws-proxy"
-private const val ProxyReferenceUrl = "https://github.com/Flowseal/tg-ws-proxy/issues/389"
-private const val AndroidAppDonateUrl = ""
-private const val OriginalIdeaDonateUrl = ""
+private const val OriginalProjectUrl = "https://github.com/m0xvi/tg-ws-proxy-axy/releases"
+private const val ProxyReferenceUrl = "https://github.com/m0xvi/tg-ws-proxy-axy/issues"
 
 private val DonateActionButtonColor = Color(0xFF00AEA5)
-private val OriginalIdeaDonateColor = Color(0xFFFF8A24)
 
 private val Android16BlobShape: Shape = GenericShape { size, _ ->
     val centerX = size.width / 2f
@@ -132,7 +129,6 @@ fun InfoTab(settingsStore: SettingsStore) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showHelpDialog by remember { mutableStateOf(false) }
-    var showDonateDialog by remember { mutableStateOf(false) }
     var actionsExpanded by rememberSaveable { mutableStateOf(true) }
     var projectExpanded by rememberSaveable { mutableStateOf(true) }
     var isCheckingUpdates by remember { mutableStateOf(false) }
@@ -147,13 +143,46 @@ fun InfoTab(settingsStore: SettingsStore) {
     val currentLogs by LogManager.logs.collectAsStateWithLifecycle()
     val currentVersion = remember { "v${BuildConfig.VERSION_NAME.removePrefix("v")}" }
     val scrollState = rememberScrollState()
+    val hasNewerUpdate = updateLatestVersion.isNotBlank() && isNewerVersion(currentVersion, updateLatestVersion)
     val updateStatusSubtitle = when {
         isCheckingUpdates -> stringResource(R.string.update_checking)
-        updateLatestVersion.isNotBlank() && isNewerVersion(currentVersion, updateLatestVersion) ->
-            stringResource(R.string.update_available_on_github, updateLatestVersion)
-        updateLatestVersion.isNotBlank() -> stringResource(R.string.update_latest_version, updateLatestVersion)
+        hasNewerUpdate -> stringResource(R.string.update_available_on_github, updateLatestVersion)
+        updateLatestVersion.isNotBlank() -> stringResource(R.string.update_latest_version, currentVersion)
         updateLastError.isNotBlank() -> stringResource(R.string.update_last_check_failed)
         else -> stringResource(R.string.update_check_manually)
+    }
+    val triggerUpdateCheck: () -> Unit = {
+        if (!isCheckingUpdates) {
+            isCheckingUpdates = true
+            scope.launch {
+                val checkedAt = System.currentTimeMillis()
+                val release = fetchLatestReleaseInfo(currentVersion)
+                settingsStore.saveUpdateState(
+                    lastCheckAt = checkedAt,
+                    latestVersion = release?.versionTag ?: "",
+                    error = if (release == null) context.getString(R.string.update_check_failed_short) else ""
+                )
+                isCheckingUpdates = false
+
+                if (release == null) {
+                    val message = if (updateLatestVersion.isNotBlank()) {
+                        context.getString(R.string.update_check_failed_known, updateLatestVersion)
+                    } else {
+                        context.getString(R.string.update_check_failed)
+                    }
+                    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                } else if (isNewerVersion(currentVersion, release.versionTag)) {
+                    settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
+                    pendingManualRelease = release
+                } else {
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.update_already_latest, currentVersion),
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
     }
     val reportText = buildSupportReport(
         port = savedPort,
@@ -204,7 +233,13 @@ fun InfoTab(settingsStore: SettingsStore) {
             )
         }
 
-            InfoHeroCard(onSupportClick = { showDonateDialog = true })
+            InfoHeroCard(
+                currentVersion = currentVersion,
+                latestVersion = updateLatestVersion,
+                hasNewerUpdate = hasNewerUpdate,
+                isCheckingUpdates = isCheckingUpdates,
+                onCheckUpdatesClick = triggerUpdateCheck
+            )
 
             ExpandableSectionCard(
             title = stringResource(R.string.actions),
@@ -276,41 +311,7 @@ fun InfoTab(settingsStore: SettingsStore) {
             WideActionTile(
                 title = stringResource(R.string.check_updates),
                 subtitle = updateStatusSubtitle,
-                onClick = {
-                    if (isCheckingUpdates) return@WideActionTile
-                    isCheckingUpdates = true
-                    scope.launch {
-                        val checkedAt = System.currentTimeMillis()
-                        val release = fetchLatestReleaseInfo(currentVersion)
-                        settingsStore.saveUpdateState(
-                            lastCheckAt = checkedAt,
-                            latestVersion = release?.versionTag ?: "",
-                            error = if (release == null) context.getString(R.string.update_check_failed_short) else ""
-                        )
-                        isCheckingUpdates = false
-
-                        if (release == null) {
-                            val message = if (updateLatestVersion.isNotBlank()) {
-                                context.getString(R.string.update_check_failed_known, updateLatestVersion)
-                            } else {
-                                context.getString(R.string.update_check_failed)
-                            }
-                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-                            return@launch
-                        }
-
-                        if (isNewerVersion(currentVersion, release.versionTag)) {
-                            settingsStore.saveUpdateDialogShown(release.versionTag, checkedAt)
-                            pendingManualRelease = release
-                        } else {
-                            Toast.makeText(
-                                context,
-                                context.getString(R.string.update_already_latest, release.versionTag),
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    }
-                },
+                onClick = triggerUpdateCheck,
                 icon = {
                     Icon(
                         imageVector = Icons.Default.Update,
@@ -399,10 +400,6 @@ fun InfoTab(settingsStore: SettingsStore) {
 
     }
 
-    if (showDonateDialog) {
-        DonateDialog(onDismiss = { showDonateDialog = false })
-    }
-
     pendingManualRelease?.let { release ->
         AppUpdateDialog(
             release = release,
@@ -430,7 +427,6 @@ fun InfoTab(settingsStore: SettingsStore) {
                         action = UPDATE_DIALOG_ACTION_UPDATE,
                         actedAt = System.currentTimeMillis()
                     )
-                    openUrlInBrowser(context, release.releaseUrl)
                 }
             }
         )
@@ -527,7 +523,13 @@ fun InfoTab(settingsStore: SettingsStore) {
 }
 
 @Composable
-private fun InfoHeroCard(onSupportClick: () -> Unit) {
+private fun InfoHeroCard(
+    currentVersion: String,
+    latestVersion: String,
+    hasNewerUpdate: Boolean,
+    isCheckingUpdates: Boolean,
+    onCheckUpdatesClick: () -> Unit
+) {
     val colors = MaterialTheme.colorScheme
     val isDark = colors.background.luminance() < 0.22f
     val heroBrush = remember(colors.primaryContainer, colors.secondaryContainer, colors.surfaceVariant) {
@@ -545,8 +547,8 @@ private fun InfoHeroCard(onSupportClick: () -> Unit) {
         Color.White.copy(alpha = 0.54f)
     }
     val glassBorder = colors.outlineVariant.copy(alpha = if (isDark) 0.50f else 0.32f)
-    val titleColor = if (isDark) colors.onSurface else colors.onSurface
-    val supportAccent = if (isDark) DonateActionButtonColor.copy(alpha = 0.92f) else DonateActionButtonColor
+    val titleColor = colors.onSurface
+    val actionAccent = if (isDark) DonateActionButtonColor.copy(alpha = 0.92f) else DonateActionButtonColor
 
     Surface(
         shape = RoundedCornerShape(32.dp),
@@ -588,13 +590,13 @@ private fun InfoHeroCard(onSupportClick: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HeroMetaPill(
-                        text = "Amurcanov Fork",
+                        text = "AXY Core 2.0",
                         containerColor = glassColor,
                         borderColor = glassBorder,
                         modifier = Modifier.weight(1f)
                     )
                     HeroMetaPill(
-                        text = "Flowseal Base",
+                        text = currentVersion,
                         containerColor = colors.primary.copy(alpha = if (isDark) 0.18f else 0.10f),
                         borderColor = colors.primary.copy(alpha = if (isDark) 0.22f else 0.14f),
                         modifier = Modifier.weight(1f)
@@ -603,7 +605,7 @@ private fun InfoHeroCard(onSupportClick: () -> Unit) {
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Telegram WS Proxy",
+                        text = "TG WS Proxy AXY",
                         style = MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.Black,
                             fontSize = 30.sp,
@@ -620,24 +622,29 @@ private fun InfoHeroCard(onSupportClick: () -> Unit) {
                 }
 
                 Button(
-                    onClick = onSupportClick,
+                    onClick = onCheckUpdatesClick,
+                    enabled = !isCheckingUpdates,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(54.dp),
                     shape = RoundedCornerShape(22.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = supportAccent,
+                        containerColor = actionAccent,
                         contentColor = Color.White
                     )
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Favorite,
+                        imageVector = Icons.Default.Update,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = stringResource(R.string.support_development),
+                        text = when {
+                            isCheckingUpdates -> stringResource(R.string.update_checking)
+                            hasNewerUpdate -> "Скачать обновление $latestVersion"
+                            else -> "Проверить обновления ($currentVersion)"
+                        },
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
                     )
@@ -952,101 +959,6 @@ private fun ProjectLinkRow(
     }
 }
 
-@Composable
-private fun SupportAccentCard(onClick: () -> Unit) {
-    val colors = MaterialTheme.colorScheme
-
-    Surface(
-        shape = RoundedCornerShape(32.dp),
-        color = colors.secondaryContainer.copy(alpha = 0.94f),
-        shadowElevation = 10.dp,
-        tonalElevation = 2.dp
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(20.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = 18.dp, y = (-20).dp)
-                    .size(88.dp)
-                    .clip(Android16BlobShape)
-                    .background(colors.primary.copy(alpha = 0.09f))
-            )
-
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = colors.surface.copy(alpha = 0.88f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Favorite,
-                            contentDescription = null,
-                            tint = DonateActionButtonColor,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = stringResource(R.string.support_project),
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = colors.onSurface
-                        )
-                    }
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = stringResource(R.string.support_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Black,
-                        color = colors.onSurface
-                    )
-                    Text(
-                        text = stringResource(R.string.support_subtitle),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.onSurfaceVariant,
-                        lineHeight = 21.sp
-                    )
-                }
-
-                Button(
-                    onClick = onClick,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(54.dp),
-                    shape = RoundedCornerShape(24.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = DonateActionButtonColor,
-                        contentColor = Color.White
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Favorite,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = stringResource(R.string.open_donation_options),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp
-                    )
-                }
-            }
-        }
-    }
-}
-
 private fun buildSupportReport(
     port: String,
     poolSize: Int,
@@ -1135,125 +1047,6 @@ private fun buildSupportReport(
         appendLine(context.getString(R.string.report_recent_errors))
         append(errorsBlock)
     }.trim()
-}
-
-@Composable
-private fun DonateDialog(
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            shape = RoundedCornerShape(32.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 10.dp,
-            shadowElevation = 14.dp,
-            modifier = Modifier.fillMaxWidth(0.92f)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 22.dp),
-                verticalArrangement = Arrangement.spacedBy(20.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = stringResource(R.string.donate_developers),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Black,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilledTonalIconButton(onClick = onDismiss) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = stringResource(R.string.close)
-                        )
-                    }
-                }
-
-                DonateSection(
-                    title = stringResource(R.string.donate_android_author),
-                    buttonColor = AppColors.donate,
-                    onClick = { openUrlInBrowser(context, AndroidAppDonateUrl) }
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_yoomoney),
-                        contentDescription = "ЮMoney",
-                        tint = Color.Unspecified,
-                        modifier = Modifier
-                            .width(126.dp)
-                            .height(28.dp)
-                    )
-                }
-
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
-
-                DonateSection(
-                    title = stringResource(R.string.donate_original_author),
-                    buttonColor = OriginalIdeaDonateColor,
-                    onClick = { openUrlInBrowser(context, OriginalIdeaDonateUrl) }
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_crypto_wordmark),
-                        contentDescription = "Crypto",
-                        tint = Color.Unspecified,
-                        modifier = Modifier
-                            .width(138.dp)
-                            .height(24.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DonateSection(
-    title: String,
-    buttonColor: Color,
-    onClick: () -> Unit,
-    buttonContent: @Composable RowScope.() -> Unit
-) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.fillMaxWidth(),
-            textAlign = TextAlign.Center
-        )
-
-        Button(
-            onClick = onClick,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(62.dp),
-            shape = RoundedCornerShape(22.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = buttonColor,
-                contentColor = Color.White
-            )
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
-                content = buttonContent
-            )
-        }
-    }
 }
 
 @Composable

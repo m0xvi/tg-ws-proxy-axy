@@ -12,8 +12,14 @@ android {
     defaultConfig {
         applicationId = "com.m0xvi.tgwsproxy.axy"
         targetSdk = 35
-        versionCode = 201
-        versionName = "2.0.1"
+        val resolvedVersionCode = (project.findProperty("appVersionCode")?.toString()?.toIntOrNull())
+            ?: System.getenv("APP_VERSION_CODE")?.toIntOrNull()
+            ?: 206
+        val resolvedVersionName = (project.findProperty("appVersionName")?.toString()?.trim()?.removePrefix("v"))
+            ?: System.getenv("APP_VERSION_NAME")?.trim()?.removePrefix("v")
+            ?: "2.0.6"
+        versionCode = resolvedVersionCode
+        versionName = resolvedVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
