@@ -398,6 +398,8 @@ pub struct RawWebSocket {
     frag: tokio::sync::Mutex<Vec<u8>>,
     pub closed: AtomicBool,
     pub secure: bool,
+    pub remote_addr: String,
+    pub remote_port: u16,
 }
 
 impl RawWebSocket {
@@ -846,6 +848,8 @@ async fn handshake_tls(
             frag: tokio::sync::Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             secure: true,
+            remote_addr: String::new(),
+            remote_port: 443,
         });
     }
     let location = headers.get("location").cloned().unwrap_or_default();
@@ -868,29 +872,11 @@ async fn handshake_plain(
     rand::thread_rng().fill_bytes(&mut ws_key_bytes);
     let ws_key = base64::engine::general_purpose::STANDARD.encode(ws_key_bytes);
 
-    let write_res = tokio::time::timeout(timeout, async {
-        if DPI_FRAGMENTATION.load(Ordering::Relaxed) && domain.len() >= 4 {
-            // TCP-сегментация посреди имени домена в заголовке Host (совместимо с прозрачными прокси операторов)
-            let mid = domain.len() / 2;
-            let seg1 = format!("GET {} HTTP/1.1\r\nHost: {}", path, &domain[..mid]);
-            let seg2 = format!(
-                "{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n",
-                &domain[mid..],
-                ws_key
-            );
-            write_half.write_all(seg1.as_bytes()).await?;
-            write_half.flush().await?;
-            write_half.write_all(seg2.as_bytes()).await?;
-            write_half.flush().await
-        } else {
-            let req = format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n",
-                path, domain, ws_key
-            );
-            write_half.write_all(req.as_bytes()).await
-        }
-    })
-    .await;
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: binary\r\n\r\n",
+        path, domain, ws_key
+    );
+    let write_res = tokio::time::timeout(timeout, write_half.write_all(req.as_bytes())).await;
 
     match write_res {
         Ok(Ok(())) => {}
@@ -907,6 +893,8 @@ async fn handshake_plain(
             frag: tokio::sync::Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
             secure: false,
+            remote_addr: String::new(),
+            remote_port: 80,
         });
     }
     let location = headers.get("location").cloned().unwrap_or_default();
@@ -1048,7 +1036,10 @@ pub async fn ws_connect_once_port(
 
     if !secure {
         let (read_half, write_half) = tokio::io::split(raw_conn);
-        return handshake_plain(read_half, write_half, domain, path, timeout).await;
+        let mut ws = handshake_plain(read_half, write_half, domain, path, timeout).await?;
+        ws.remote_addr = dial_addr.to_string();
+        ws.remote_port = port;
+        return Ok(ws);
     }
 
     let sni_name = sni.unwrap_or(domain);
@@ -1079,7 +1070,10 @@ pub async fn ws_connect_once_port(
         };
 
     let (read_half, write_half) = tokio::io::split(tls_conn);
-    handshake_tls(read_half, write_half, domain, path, timeout).await
+    let mut ws = handshake_tls(read_half, write_half, domain, path, timeout).await?;
+    ws.remote_addr = dial_addr.to_string();
+    ws.remote_port = port;
+    Ok(ws)
 }
 
 // wsConnect: пытается ip, при необходимости резолвит DoH

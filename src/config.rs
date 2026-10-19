@@ -111,7 +111,7 @@ pub static RECV_BUF: AtomicI32 = AtomicI32::new(DEFAULT_RECV_BUF as i32);
 pub static SEND_BUF: AtomicI32 = AtomicI32::new(DEFAULT_SEND_BUF as i32);
 pub static BUFFER_SIZE: AtomicI32 = AtomicI32::new(256 * 1024);
 pub static POOL_SIZE: AtomicI32 = AtomicI32::new(DEFAULT_POOL_SZ);
-pub static LOG_VERBOSE: AtomicBool = AtomicBool::new(false);
+pub static LOG_VERBOSE: AtomicBool = AtomicBool::new(true);
 // proxy/config.py::ProxyConfig — мобильные эквиваленты
 pub static DISABLE_SECURE: AtomicBool = AtomicBool::new(true);
 pub static DPI_FRAGMENTATION: AtomicBool = AtomicBool::new(true);
@@ -132,6 +132,7 @@ impl Default for Cfproxy429State {
 
 // Cloudflare proxy config
 pub static CFPROXY_ENABLED: AtomicBool = AtomicBool::new(true);
+pub static CFPROXY_PRIORITY: AtomicBool = AtomicBool::new(true);
 
 pub struct CfproxyConfig {
     pub user_domain: String,
@@ -603,10 +604,52 @@ fn mask_domain(domain: &str) -> String {
         .join(".")
 }
 
+static NATIVE_LOG_RING: Lazy<parking_lot::Mutex<std::collections::VecDeque<String>>> =
+    Lazy::new(|| parking_lot::Mutex::new(std::collections::VecDeque::with_capacity(256)));
+
+pub fn drain_native_logs() -> String {
+    let mut ring = NATIVE_LOG_RING.lock();
+    if ring.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(ring.len() * 64);
+    while let Some(item) = ring.pop_front() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&item);
+    }
+    out
+}
+
+pub fn clear_native_logs() {
+    NATIVE_LOG_RING.lock().clear();
+}
+
 fn emit(prefix: &str, msg: &str) {
-    let line = format!("{}{}", prefix, censor_domains(msg));
+    let censored = censor_domains(msg);
+    let line = format!("{}{}", prefix, censored);
     eprintln!("{}", line);
     android_log_line(&line);
+
+    let prio = if prefix.starts_with("[ERROR]") {
+        6
+    } else if prefix.starts_with("[WARN]") {
+        5
+    } else if prefix.starts_with("[DEBUG]") {
+        3
+    } else {
+        4
+    };
+    let clean_msg = censored.replace('\n', " ").replace('\r', "");
+    let trimmed = clean_msg.trim();
+    if !trimmed.is_empty() {
+        let mut ring = NATIVE_LOG_RING.lock();
+        if ring.len() >= 250 {
+            ring.pop_front();
+        }
+        ring.push_back(format!("{}|{}", prio, trimmed));
+    }
 }
 
 pub fn log_info(msg: &str) {

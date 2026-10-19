@@ -25,6 +25,8 @@ interface ProxyLibrary : Library {
     fun SetSecret(secret: String)
     fun GetSecretWithPrefix(): Pointer?
     fun GetStats(): Pointer?
+    fun DrainLogs(): Pointer?
+    fun ClearLogs()
     fun GetCfProxyDomains(): Pointer?
     fun RefreshCfProxyDomains(): Int
     fun FreeString(p: Pointer)
@@ -106,5 +108,23 @@ object NativeProxy {
         val res = ptr.getString(0)
         ProxyLibrary.INSTANCE.FreeString(ptr)
         return res
+    }
+
+    fun drainLogs(): String? {
+        return try {
+            val ptr = ProxyLibrary.INSTANCE.DrainLogs() ?: return null
+            val res = ptr.getString(0)
+            ProxyLibrary.INSTANCE.FreeString(ptr)
+            res
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    fun clearLogs() {
+        try {
+            ProxyLibrary.INSTANCE.ClearLogs()
+        } catch (_: Throwable) {
+        }
     }
 }

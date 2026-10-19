@@ -10,10 +10,13 @@
             <gradient
                 android:type="radial"
                 android:centerX="54"
-                android:centerY="54"
-                android:gradientRadius="76"
-                android:startColor="#262626"
-                android:endColor="#101010" />
+                android:centerY="46"
+                android:gradientRadius="78"
+                android:startColor="#2E1065"
+                android:endColor="#090514" />
         </aapt:attr>
     </path>
+    <path
+        android:fillColor="#1A10B981"
+        android:pathData="M54,18 L82,34 L82,68 L54,88 L26,68 L26,34 Z" />
 </vector>

@@ -4,10 +4,22 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Outer Emerald-Cyan Shield -->
     <path
-        android:fillColor="#279fda"
-        android:pathData="M 36,30 L 72,30 L 72,38 L 58,38 L 58,78 L 50,78 L 50,38 L 36,38 Z" />
+        android:fillColor="#10B981"
+        android:pathData="M54,24 L76,36 L76,62 C76,73 66,81 54,86 C42,81 32,73 32,62 L32,36 Z" />
     <path
-        android:fillColor="#1c75a1"
-        android:pathData="M 54,30 L 72,30 L 72,38 L 58,38 L 58,78 L 54,78 Z" />
+        android:fillColor="#059669"
+        android:pathData="M54,24 L76,36 L76,62 C76,73 66,81 54,86 Z" />
+    <!-- Inner Dark Core -->
+    <path
+        android:fillColor="#1E1B4B"
+        android:pathData="M54,30 L70,39 L70,60 C70,69 62,75 54,79 C46,75 38,69 38,60 L38,39 Z" />
+    <!-- Lightning Bolt / Fast Route Symbol -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M57,34 L43,55 L53,55 L49,74 L65,51 L55,51 Z" />
+    <path
+        android:fillColor="#F8FAFC"
+        android:pathData="M57,34 L46,52 L54,52 L51,67 L62,51 L54,51 Z" />
 </vector>

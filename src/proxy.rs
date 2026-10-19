@@ -958,9 +958,17 @@ pub async fn bridge_ws<R, W>(
             };
             let n = data.len();
             STATS.bytes_down.fetch_add(n as i64, Ordering::Relaxed);
-            down_bytes_c.fetch_add(n as i64, Ordering::Relaxed);
+            let total_down_now = down_bytes_c.fetch_add(n as i64, Ordering::Relaxed) + (n as i64);
             down_packets_c.fetch_add(1, Ordering::Relaxed);
             *la_down.lock().await = std::time::Instant::now();
+
+            // Если соединение преодолело порог 24 КБ (порог 16KB ТСПУ пройден!), фиксируем быстрый маршрут CF
+            if total_down_now >= 24_576
+                && !ws_down.remote_addr.is_empty()
+                && !ws_down.remote_addr.starts_with("149.154.")
+            {
+                confirm_cf_route_healthy(&ws_down.remote_addr, ws_down.remote_port, ws_down.secure);
+            }
 
             tg_dec.xor(&mut data);
             clt_enc.xor(&mut data);
@@ -989,19 +997,58 @@ pub async fn bridge_ws<R, W>(
         }
     };
     let elapsed = now_monotonic() - start;
+    let total_up = up_bytes.load(Ordering::Relaxed);
+    let total_down = down_bytes.load(Ordering::Relaxed);
     linfo!(
         "[{}] {} WS session closed ({}): ^{}{} ({} pkts) v{}{} ({} pkts) in {:.1}s",
         label,
         dc_tag,
         close_reason,
-        human_bytes(up_bytes.load(Ordering::Relaxed)),
+        human_bytes(total_up),
         "",
         up_packets.load(Ordering::Relaxed),
-        human_bytes(down_bytes.load(Ordering::Relaxed)),
+        human_bytes(total_down),
         "",
         down_packets.load(Ordering::Relaxed),
         elapsed
     );
+
+    // Детектор мгновенного обрыва ТСПУ (после 101 Switching Protocols или на пороге 16KB):
+    // Срабатывает ТОЛЬКО если обрыв произошёл со стороны апстрима (upstream: ws_close / timeout / send_failed)
+    // либо апстрим вообще ничего не ответил (total_down == 0 при total_up > 0).
+    let is_upstream_drop =
+        close_reason.starts_with("upstream:") || (total_up > 0 && total_down == 0);
+    if total_down >= 20_480 || (!is_upstream_drop && total_down > 0) {
+        if !ws.remote_addr.is_empty() && !ws.remote_addr.starts_with("149.154.") {
+            confirm_cf_route_healthy(&ws.remote_addr, ws.remote_port, ws.secure);
+        }
+    } else if is_upstream_drop && elapsed < 10.0 && total_down < 20_480 {
+        if ws.remote_addr.starts_with("149.154.") {
+            IP_FAIL_UNTIL
+                .write()
+                .insert(ws.remote_addr.clone(), now_monotonic() + 300.0);
+            WS_BLACKLIST
+                .write()
+                .insert(DcKey::new(dc, is_media, false), true);
+            lwarn!(
+                " Прямой WS {} сброшен ТСПУ через {:.1}с (↓{}B, {}) -> переключение на CloudFlare",
+                ws.remote_addr,
+                elapsed,
+                total_down,
+                close_reason
+            );
+        } else if !ws.remote_addr.is_empty() {
+            mark_cf_route_unstable(&ws.remote_addr, ws.remote_port);
+            lwarn!(
+                " CF маршрут {}:{} сброшен через {:.1}с (↓{}B, {}) -> автосмена порта/IP",
+                ws.remote_addr,
+                ws.remote_port,
+                elapsed,
+                total_down,
+                close_reason
+            );
+        }
+    }
 
     ws.close().await;
 }
@@ -1415,8 +1462,8 @@ async fn cfproxy_acquire_ws(
 
 pub async fn do_fallback<R, W>(
     pools: &ProxyPools,
-    conn_read: R,
-    conn_write: W,
+    mut conn_read: R,
+    mut conn_write: W,
     relay_init: &[u8],
     label: String,
     dc: i32,
@@ -1492,7 +1539,7 @@ where
                     clt_enc.clone_state(),
                     tg_enc.clone_state(),
                     tg_dec.clone_state(),
-                cancel_token,
+                    cancel_token,
                 )
                 .await;
                 return true;
@@ -1502,36 +1549,197 @@ where
         }
     }
 
-    // Шаг 2: cf-ws (без halves).
+    // Шаг 2: cf-ws с проверкой реального прохождения первого MTProto-пакета:
+    // если оператор/ТСПУ сбрасывает соединение сразу после HTTP 101 (например, на порту 80),
+    // мы НЕ рвём клиентское соединение Telegram, а прозрачно переключаемся на другой порт/IP!
     if use_cf {
-        if let Some((ws, _chosen_domain)) =
-            cfproxy_acquire_ws(dc, is_media, ws_path, &cancel_token).await
+        // Считываем первый MTProto-пакет от клиента (он уже в буфере сокета сразу за 64-байтным handshake)
+        let mut first_buf = vec![0u8; 16384];
+        let mut clt_dec_state = clt_dec.clone_state();
+        let mut clt_enc_state = clt_enc.clone_state();
+        let first_plain_opt = match tokio::time::timeout(
+            Duration::from_millis(800),
+            conn_read.read(&mut first_buf),
+        )
+        .await
         {
-            STATS.connections_cfproxy.fetch_add(1, Ordering::Relaxed);
-            linfo!(" DC{}{} подключен через CF", dc, m_tag);
-
-            if ws.send(relay_init).await.is_ok() {
-                bridge_ws(
-                    conn_read,
-                    conn_write,
-                    ws,
-                    label,
-                    dc,
-                    is_media,
-                    splitter,
-                    clt_dec.clone_state(),
-                    clt_enc.clone_state(),
-                    tg_enc.clone_state(),
-                    tg_dec.clone_state(),
-                    cancel_token,
-                )
-                .await;
-                return true;
+            Ok(Ok(0)) => return false,
+            Ok(Ok(n)) => {
+                first_buf.truncate(n);
+                STATS.bytes_up.fetch_add(n as i64, Ordering::Relaxed);
+                clt_dec_state.xor(&mut first_buf);
+                Some(first_buf)
             }
-            ws.close().await;
-            // CF умер сразу после хендшейка — пробуем TCP на том же conn.
+            Ok(Err(_)) => return false,
+            Err(_) => None,
+        };
+
+        for attempt in 0..2 {
+            let Some((ws, _chosen_domain)) =
+                cfproxy_acquire_ws(dc, is_media, ws_path, &cancel_token).await
+            else {
+                break;
+            };
+
+            if let Some(ref first_plain) = first_plain_opt {
+                let mut cand_tg_enc = tg_enc.clone_state();
+                let mut cand_tg_dec = tg_dec.clone_state();
+                let mut cand_splitter = splitter
+                    .as_ref()
+                    .and_then(|sp| sp.fresh_for_init(relay_init));
+                let mut enc_first = first_plain.clone();
+                cand_tg_enc.xor(&mut enc_first);
+
+                let mut batch = Vec::with_capacity(4);
+                batch.push(relay_init.to_vec());
+                if let Some(sp) = cand_splitter.as_mut() {
+                    let parts = sp.split(&enc_first);
+                    if parts.is_empty() {
+                        batch.push(enc_first);
+                    } else {
+                        batch.extend(parts);
+                    }
+                } else {
+                    batch.push(enc_first);
+                }
+
+                if ws.send_batch(&batch).await.is_ok() {
+                    match ws.recv_with_timeout(Duration::from_millis(2800)).await {
+                        Ok(mut first_reply) => {
+                            let rlen = first_reply.len();
+                            STATS.connections_cfproxy.fetch_add(1, Ordering::Relaxed);
+                            STATS.bytes_down.fetch_add(rlen as i64, Ordering::Relaxed);
+                            cand_tg_dec.xor(&mut first_reply);
+                            clt_enc_state.xor(&mut first_reply);
+                            if conn_write.write_all(&first_reply).await.is_err() {
+                                ws.close().await;
+                                return false;
+                            }
+                            if !ws.remote_addr.is_empty() && !ws.remote_addr.starts_with("149.154.") {
+                                confirm_cf_route_healthy(&ws.remote_addr, ws.remote_port, ws.secure);
+                            }
+                            linfo!(
+                                " DC{}{} подключен через CF ({}:{}, tls={})",
+                                dc, m_tag, ws.remote_addr, ws.remote_port, ws.secure
+                            );
+                            bridge_ws(
+                                conn_read,
+                                conn_write,
+                                ws,
+                                label,
+                                dc,
+                                is_media,
+                                cand_splitter,
+                                clt_dec_state,
+                                clt_enc_state,
+                                cand_tg_enc,
+                                cand_tg_dec,
+                                cancel_token,
+                            )
+                            .await;
+                            return true;
+                        }
+                        Err(e) => {
+                            lwarn!(
+                                " CF {}:{} (tls={}) сброшен после 101 ({}) -> попытка #{}",
+                                ws.remote_addr,
+                                ws.remote_port,
+                                ws.secure,
+                                e.compact(),
+                                attempt + 2
+                            );
+                            mark_cf_route_unstable(&ws.remote_addr, ws.remote_port);
+                            ws.close().await;
+                            continue;
+                        }
+                    }
+                } else {
+                    mark_cf_route_unstable(&ws.remote_addr, ws.remote_port);
+                    ws.close().await;
+                    continue;
+                }
+            } else {
+                // Если клиент ещё не прислал первый пакет, отправляем relay_init как обычно
+                if ws.send(relay_init).await.is_ok() {
+                    STATS.connections_cfproxy.fetch_add(1, Ordering::Relaxed);
+                    linfo!(
+                        " DC{}{} подключен через CF ({}:{}, tls={})",
+                        dc, m_tag, ws.remote_addr, ws.remote_port, ws.secure
+                    );
+                    bridge_ws(
+                        conn_read,
+                        conn_write,
+                        ws,
+                        label,
+                        dc,
+                        is_media,
+                        splitter,
+                        clt_dec_state,
+                        clt_enc_state,
+                        tg_enc.clone_state(),
+                        tg_dec.clone_state(),
+                        cancel_token,
+                    )
+                    .await;
+                    return true;
+                }
+                mark_cf_route_unstable(&ws.remote_addr, ws.remote_port);
+                ws.close().await;
+            }
         }
-        // CF не дал ws — halves НЕ тронуты, идём в TCP fallback ниже.
+
+        // Шаг 2.5: Если все попытки через CF не прошли, пробуем прямой WS к Telegram с SNI-fronting
+        if let Some(&direct_ip) = DEFAULT_WS_DC_IPS.get(&dc) {
+            let direct_domains = ws_domains(dc, is_media);
+            for dom in &direct_domains {
+                if let Some(ws) = connect_fronted(direct_ip, dom, ws_path).await {
+                    let mut cand_tg_enc = tg_enc.clone_state();
+                    let cand_tg_dec = tg_dec.clone_state();
+                    let mut cand_splitter = splitter
+                        .as_ref()
+                        .and_then(|sp| sp.fresh_for_init(relay_init));
+                    let send_ok = if let Some(ref first_plain) = first_plain_opt {
+                        let mut enc_first = first_plain.clone();
+                        cand_tg_enc.xor(&mut enc_first);
+                        let mut batch = vec![relay_init.to_vec()];
+                        if let Some(sp) = cand_splitter.as_mut() {
+                            let parts = sp.split(&enc_first);
+                            if parts.is_empty() {
+                                batch.push(enc_first);
+                            } else {
+                                batch.extend(parts);
+                            }
+                        } else {
+                            batch.push(enc_first);
+                        }
+                        ws.send_batch(&batch).await.is_ok()
+                    } else {
+                        ws.send(relay_init).await.is_ok()
+                    };
+                    if send_ok {
+                        linfo!(" DC{}{} подключен напрямую (SNI-fronting {})", dc, m_tag, direct_ip);
+                        bridge_ws(
+                            conn_read,
+                            conn_write,
+                            ws,
+                            label,
+                            dc,
+                            is_media,
+                            cand_splitter,
+                            clt_dec_state,
+                            clt_enc_state,
+                            cand_tg_enc,
+                            cand_tg_dec,
+                            cancel_token,
+                        )
+                        .await;
+                        return true;
+                    }
+                    ws.close().await;
+                }
+            }
+        }
+        return false;
     }
 
     // Шаг 3: tcp.
@@ -2340,12 +2548,16 @@ pub async fn run_proxy(
 
 pub fn parse_cidr_pool(cidrs_str: &str) -> HashMap<i32, String> {
     let mut result = HashMap::new();
-    // Всегда заполняем базовые прямые WS IP для DC 1..5 (чтобы пул прямых WS-соединений
-    // с SNI-fronting и DPI-фрагментацией работал даже при пустом dc_ips из UI).
-    for (&dc, &ip) in DEFAULT_WS_DC_IPS.iter() {
-        result.insert(dc, ip.to_string());
-    }
+    // ВАЖНО: если включён CloudFlare CDN с приоритетом (по умолчанию в UI передаётся пустой cidrs_str),
+    // оставляем карту пустой, чтобы трафик шёл сразу через CloudFlare (do_fallback) и не попадал
+    // под сброс ТСПУ после рукопожатия на прямых IP Telegram (149.154.x.x).
+    // Если же CloudFlare CDN выключен — предзаполняем прямые WS IP для DC 1..5.
     if cidrs_str.trim().is_empty() {
+        if !CFPROXY_ENABLED.load(Ordering::Relaxed) || !CFPROXY_PRIORITY.load(Ordering::Relaxed) {
+            for (&dc, &ip) in DEFAULT_WS_DC_IPS.iter() {
+                result.insert(dc, ip.to_string());
+            }
+        }
         return result;
     }
     for pair in cidrs_str.split(',') {

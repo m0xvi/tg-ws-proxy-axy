@@ -20,8 +20,80 @@ pub struct CfFastRoute {
 static CF_FAST_ROUTE: Lazy<parking_lot::RwLock<Option<CfFastRoute>>> =
     Lazy::new(|| parking_lot::RwLock::new(None));
 
+static CF_BAD_ROUTES: Lazy<parking_lot::RwLock<std::collections::HashMap<(String, u16), Instant>>> =
+    Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+static PORT80_SHORT_DROPS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 pub fn clear_cf_fast_route() {
     *CF_FAST_ROUTE.write() = None;
+    CF_BAD_ROUTES.write().clear();
+    PORT80_SHORT_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn is_cf_route_bad(dial_addr: &str, port: u16) -> bool {
+    let now = Instant::now();
+    let guard = CF_BAD_ROUTES.read();
+    if let Some(&until) = guard.get(&(dial_addr.to_string(), port)) {
+        if now < until {
+            return true;
+        }
+    }
+    if let Some(&until) = guard.get(&("*".to_string(), port)) {
+        if now < until {
+            return true;
+        }
+    }
+    false
+}
+
+/// Вызывается, если WS-соединение через CF оборвалось сразу после рукопожатия (< 6с и < 20КБ),
+/// что характерно для сброса ТСПУ (16KB блок или DPI-сброс порта 80 после HTTP 101).
+pub fn mark_cf_route_unstable(dial_addr: &str, port: u16) {
+    if dial_addr.is_empty() {
+        return;
+    }
+    {
+        let mut fast = CF_FAST_ROUTE.write();
+        if let Some(r) = fast.as_ref() {
+            if r.port == port || r.clean_ip.as_deref() == Some(dial_addr) {
+                *fast = None;
+            }
+        }
+    }
+    let now = Instant::now();
+    let mut bad = CF_BAD_ROUTES.write();
+    bad.insert((dial_addr.to_string(), port), now + Duration::from_secs(180));
+    if port == 80 {
+        let drops = PORT80_SHORT_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if drops >= 2 {
+            lwarn!(" CF port 80 сбрасывается оператором после 101 -> приоритет TLS 443 на 5 мин");
+            bad.insert(("*".to_string(), 80), now + Duration::from_secs(300));
+        }
+    }
+}
+
+/// Фиксирует рабочий маршрут в CF_FAST_ROUTE только после того, как через него реально прошёл трафик
+/// (больше порога 16KB ТСПУ или стабильная сессия).
+pub fn confirm_cf_route_healthy(dial_addr: &str, port: u16, secure: bool) {
+    if dial_addr.is_empty() {
+        return;
+    }
+    if port == 80 {
+        PORT80_SHORT_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    let is_clean = CF_CLEAN_IPS.iter().any(|&ip| ip == dial_addr);
+    *CF_FAST_ROUTE.write() = Some(CfFastRoute {
+        clean_ip: if is_clean {
+            Some(dial_addr.to_string())
+        } else {
+            None
+        },
+        port,
+        secure,
+        expires_at: Instant::now() + Duration::from_secs(600),
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -660,19 +732,33 @@ async fn race_cf_mobile_endpoints(
         let ip3 = CF_CLEAN_IPS[(base_idx + 2) % total_clean].to_string(); // 172.64.148..155.x
 
         for ip in [ip1, ip2, ip3] {
-            if prefer_plain {
-                candidates.push((ip.clone(), true, 80, false));
-                candidates.push((ip, true, 443, true));
+            let ports = if prefer_plain && !is_cf_route_bad(&ip, 80) {
+                [(80u16, false), (443u16, true)]
             } else {
-                candidates.push((ip.clone(), true, 443, true));
-                candidates.push((ip, true, 80, false));
+                [(443u16, true), (80u16, false)]
+            };
+            for (p, sec) in ports {
+                if !is_cf_route_bad(&ip, p) {
+                    candidates.push((ip.clone(), true, p, sec));
+                }
             }
         }
     }
 
+    // Если все кандидаты были в штрафном списке — очищаем список и пробуем оба порта заново
+    if candidates.is_empty() && total_clean >= 2 {
+        CF_BAD_ROUTES.write().clear();
+        let ip1 = CF_CLEAN_IPS[0].to_string();
+        let ip2 = CF_CLEAN_IPS[1].to_string();
+        candidates.push((ip1.clone(), true, 443, true));
+        candidates.push((ip1, true, 80, false));
+        candidates.push((ip2.clone(), true, 443, true));
+        candidates.push((ip2, true, 80, false));
+    }
+
     // Также параллельно запускаем подключение по самому домену (на случай кастомного не-CF хоста)
-    let def_port = if prefer_plain { 80 } else { 443 };
-    candidates.push((domain.to_string(), false, def_port, !prefer_plain));
+    let def_port = if prefer_plain && !is_cf_route_bad(domain, 80) { 80 } else { 443 };
+    candidates.push((domain.to_string(), false, def_port, def_port == 443));
 
     let race_timeout = attempt_timeout.clamp(Duration::from_millis(1500), Duration::from_millis(2500));
     let (tx, mut rx) = tokio::sync::mpsc::channel(candidates.len());
@@ -683,9 +769,9 @@ async fn race_cf_mobile_endpoints(
         let path_s = path.to_string();
         let tx = tx.clone();
         tasks.push(tokio::spawn(async move {
-            // Небольшой ступенчатый сдвиг (0ms для первой пары, 40ms для остальных), чтобы не дублировать нагрузку
+            // Небольшой ступенчатый сдвиг (0ms для первой пары, 35ms для остальных)
             if idx >= 2 {
-                tokio::time::sleep(Duration::from_millis((idx as u64) * 25)).await;
+                tokio::time::sleep(Duration::from_millis((idx as u64) * 30)).await;
             }
             match ws_connect_once_port(&dial_addr, port, &domain_s, &path_s, race_timeout, None, secure)
                 .await
@@ -725,13 +811,14 @@ async fn race_cf_mobile_endpoints(
                             t.abort();
                         }
                         linfo!(
-                            " CF mobile route ok: {} via {}:{} (tls={})",
+                            " CF mobile route connected: {} via {}:{} (tls={})",
                             domain,
                             winning_ip,
                             winning_route.port,
                             winning_route.secure
                         );
-                        *CF_FAST_ROUTE.write() = Some(winning_route);
+                        // НЕ сохраняем маршрут в CF_FAST_ROUTE до проверки реального трафика в bridge_ws,
+                        // чтобы сброс ТСПУ после 101 не зацикливал прокси на заблокированном порту!
                         return (Some(ws), winning_ip, None);
                     }
                     Some(Err(e)) => {

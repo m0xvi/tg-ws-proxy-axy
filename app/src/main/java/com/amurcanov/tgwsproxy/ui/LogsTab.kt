@@ -60,7 +60,7 @@ fun LogsTab(settingsStore: SettingsStore) {
         } else {
             currentLogs.filter { entry ->
                 entry.isEssential ||
-                (savedInfo && entry.priority == 4) ||
+                (savedInfo && entry.priority <= 4) ||
                 (savedError && entry.priority >= 5)
             }
         }

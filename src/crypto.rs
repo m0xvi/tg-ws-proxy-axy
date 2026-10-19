@@ -74,6 +74,7 @@ pub fn proto_tag_to_type(proto: u32) -> i32 {
 pub struct MsgSplitter {
     stream: Aes256Ctr,
     proto_type: i32,
+    proto_raw: u32,
     cipher_buf: Vec<u8>,
     plain_buf: Vec<u8>,
     disabled: bool,
@@ -91,10 +92,15 @@ impl MsgSplitter {
         Some(MsgSplitter {
             stream,
             proto_type: proto_tag_to_type(proto),
+            proto_raw: proto,
             cipher_buf: Vec::new(),
             plain_buf: Vec::new(),
             disabled: false,
         })
+    }
+
+    pub fn fresh_for_init(&self, init_data: &[u8]) -> Option<MsgSplitter> {
+        MsgSplitter::new(init_data, self.proto_raw)
     }
 
     pub fn split(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {

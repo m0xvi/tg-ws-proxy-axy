@@ -222,10 +222,11 @@ pub unsafe extern "C" fn SetCfProxyCacheDir(c_cache_dir: *const c_char) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn SetCfProxyConfig(
     enabled: c_int,
-    _priority: c_int,
+    priority: c_int,
     c_user_domain: *const c_char,
 ) {
     CFPROXY_ENABLED.store(enabled != 0, Ordering::Relaxed);
+    CFPROXY_PRIORITY.store(priority != 0, Ordering::Relaxed);
     let user_domain = cstr_to_string(c_user_domain);
     // Поддержка нескольких доменов как --cfproxy-domain (repeatable) и очистка URL-схем.
     let list = coerce_domain_list_str(&user_domain);
@@ -318,6 +319,17 @@ pub unsafe extern "C" fn SetSecret(c_secret: *const c_char) {
 pub extern "C" fn GetStats() -> *mut c_char {
     let s = STATS.summary();
     CString::new(s).unwrap_or_default().into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DrainLogs() -> *mut c_char {
+    let s = drain_native_logs();
+    CString::new(s).unwrap_or_default().into_raw()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ClearLogs() {
+    clear_native_logs();
 }
 
 #[unsafe(no_mangle)]
