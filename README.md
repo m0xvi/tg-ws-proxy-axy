@@ -64,7 +64,26 @@ tg-ws-proxy/
 
 ---
 
-## 🛠 Сборка
+## 🚀 Сборка и Релизы через GitHub Actions (без локальной настройки SDK/Xcode)
+
+Репозиторий [`m0xvi/tg-ws-proxy-axy`](https://github.com/m0xvi/tg-ws-proxy-axy) полностью настроен для облачной сборки **Android APK** и **iOS IPA** прямо на серверах GitHub (`.github/workflows/build.yml`):
+
+1. **Автоматическая сборка при каждом `git push` в `main`:**
+   - Вкладка **Actions** на GitHub запускает 3 параллельных этапа:
+     - `Rust Core & FFI Smoke` (Linux): компилирует Rust-ядро и прогоняет unit-тесты и C FFI тест.
+     - `Android APK` (Linux): собирает свежее Rust-ядро `libtgwsproxy.so` через Android NDK (`arm64-v8a` и `armeabi-v7a`) и компилирует подписанные APK (`app-arm64-release.apk`, `app-arm32-release.apk`, `app-universal-release.apk`).
+     - `iOS IPA` (macOS 14 + Xcode): собирает `libtgwsproxy.a` под `aarch64-apple-ios` и упаковывает `TgWsProxy-free.ipa` и `TgWsProxy-vpn.ipa`.
+   - Готовые архивы `android-apks` и `ios-ipas` доступны внизу страницы завершившегося запуска во вкладке **Actions**.
+
+2. **Выпуск готового Релиза во вкладке Releases (в 1 клик из браузера):**
+   - Перейдите на GitHub в **Actions** → **Build & Release Universal (Android APK + iOS IPA)** → нажмите кнопку **Run workflow**.
+   - В поле `release_tag` введите версию, например `v2.0.0`, и нажмите зелёную кнопку **Run workflow**.
+   - Через ~6–8 минут GitHub автоматически создаст страницу релиза в `https://github.com/m0xvi/tg-ws-proxy-axy/releases` и прикрепит к ней все 5 файлов (`.apk` для Android и `.ipa` для iOS), а встроенная проверка обновлений в приложении увидит новую версию!
+   - *(Альтернативно через консоль: `git tag v2.0.0 && git push origin v2.0.0` также автоматически соберёт и опубликует релиз).*
+
+---
+
+## 🛠 Локальная сборка
 
 ### 1. Проверка единого Rust-ядра и FFI-контракта
 ```bash

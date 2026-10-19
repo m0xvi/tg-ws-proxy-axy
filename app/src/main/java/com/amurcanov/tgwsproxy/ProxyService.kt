@@ -47,6 +47,8 @@ class ProxyService : Service() {
     private var lastCfEnabled: Boolean = true
     private var lastCfPriority: Boolean = true
     private var lastCfDomain: String = ""
+    private var lastDpiFragmentation: Boolean = true
+    private var lastDisableSecure: Boolean = true
     private var lastSecretKey: String = ""
 
     companion object {
@@ -60,6 +62,8 @@ class ProxyService : Service() {
         const val EXTRA_CFPROXY_ENABLED = "EXTRA_CFPROXY_ENABLED"
         const val EXTRA_CFPROXY_PRIORITY = "EXTRA_CFPROXY_PRIORITY"
         const val EXTRA_CFPROXY_DOMAIN = "EXTRA_CFPROXY_DOMAIN"
+        const val EXTRA_DPI_FRAGMENTATION = "EXTRA_DPI_FRAGMENTATION"
+        const val EXTRA_DISABLE_SECURE = "EXTRA_DISABLE_SECURE"
         const val EXTRA_SECRET_KEY = "EXTRA_SECRET_KEY"
         
         private const val NOTIFICATION_ID = 101
@@ -97,8 +101,10 @@ class ProxyService : Service() {
                 val cfEnabled = intent.getBooleanExtra(EXTRA_CFPROXY_ENABLED, true)
                 val cfPriority = intent.getBooleanExtra(EXTRA_CFPROXY_PRIORITY, true)
                 val cfDomain = intent.getStringExtra(EXTRA_CFPROXY_DOMAIN) ?: ""
+                val dpiFrag = intent.getBooleanExtra(EXTRA_DPI_FRAGMENTATION, true)
+                val disableSecure = intent.getBooleanExtra(EXTRA_DISABLE_SECURE, true)
                 val secretKey = intent.getStringExtra(EXTRA_SECRET_KEY) ?: ""
-                startProxy(bindIp, port, ips, poolSize, cfEnabled, cfPriority, cfDomain, secretKey)
+                startProxy(bindIp, port, ips, poolSize, cfEnabled, cfPriority, cfDomain, secretKey, dpiFrag, disableSecure)
             }
             ACTION_STOP -> {
                 stopProxy()
@@ -111,7 +117,7 @@ class ProxyService : Service() {
                 // If we had saved params, try to restart
                 if (lastPort > 0 && lastSecretKey.isNotEmpty()) {
                     Log.w(TAG, "Service restarted by system, re-starting proxy")
-                    startProxy(lastBindIp, lastPort, lastIps, lastPoolSize, lastCfEnabled, lastCfPriority, lastCfDomain, lastSecretKey)
+                    startProxy(lastBindIp, lastPort, lastIps, lastPoolSize, lastCfEnabled, lastCfPriority, lastCfDomain, lastSecretKey, lastDpiFragmentation, lastDisableSecure)
                 } else {
                     stopSelf()
                 }
@@ -138,7 +144,8 @@ class ProxyService : Service() {
 
     private fun startProxy(bindIp: String, port: Int, ips: String, poolSize: Int = 4,
                            cfEnabled: Boolean = true, cfPriority: Boolean = true,
-                           cfDomain: String = "", secretKey: String = "") {
+                           cfDomain: String = "", secretKey: String = "",
+                           dpiFragmentation: Boolean = true, disableSecure: Boolean = true) {
         if (_isRunning.value || stopInProgress) return
         _isVerifiedRunning.value = false
 
@@ -150,6 +157,8 @@ class ProxyService : Service() {
         lastCfEnabled = cfEnabled
         lastCfPriority = cfPriority
         lastCfDomain = cfDomain
+        lastDpiFragmentation = dpiFragmentation
+        lastDisableSecure = disableSecure
         lastSecretKey = secretKey
         notificationStartedAtMs = System.currentTimeMillis()
         lastNotificationContent = getString(R.string.notification_starting)
@@ -184,6 +193,8 @@ class ProxyService : Service() {
 
             try {
                 NativeProxy.setPoolSize(poolSize)
+                NativeProxy.setDpiFragmentation(dpiFragmentation)
+                NativeProxy.setDisableSecure(disableSecure)
                 NativeProxy.setCfProxyCacheDir(cacheDir.absolutePath)
                 NativeProxy.setCfProxyConfig(cfEnabled, cfPriority, cfDomain)
                 val result = NativeProxy.startProxy(bindIp, port, ips, secretKey, 1)
@@ -295,7 +306,9 @@ class ProxyService : Service() {
                 cfEnabled = lastCfEnabled,
                 cfPriority = lastCfPriority,
                 cfDomain = lastCfDomain,
-                secretKey = lastSecretKey
+                secretKey = lastSecretKey,
+                dpiFragmentation = lastDpiFragmentation,
+                disableSecure = lastDisableSecure
             )
         }
     }

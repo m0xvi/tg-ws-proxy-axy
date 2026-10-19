@@ -45,9 +45,11 @@ struct SettingsView: View {
             }
             .disabled(proxy.isRunning)
 
-            Section("Cloudflare".tgLoc) {
+            Section("Cloudflare и мобильные сети".tgLoc) {
                 Toggle("Использовать Cloudflare".tgLoc, isOn: $proxy.configuration.cloudflareEnabled)
-                TextField("Свой домен (необязательно)".tgLoc, text: $proxy.configuration.cloudflareDomain)
+                Toggle("DPI-фрагментация (LTE/5G)".tgLoc, isOn: $proxy.configuration.dpiFragmentation)
+                Toggle("Порт 80 для Cloudflare (No TLS)".tgLoc, isOn: $proxy.configuration.disableSecure)
+                TextField("Свой домен или *.workers.dev".tgLoc, text: $proxy.configuration.cloudflareDomain)
                     .proxyTextInputBehavior()
                 DisclosureGroup("\("Домены CF Worker".tgLoc) (\(proxy.cloudflareDomains.count))") {
                     if proxy.cloudflareDomains.isEmpty {

@@ -10,6 +10,8 @@ struct ProxyConfiguration: Codable, Equatable, Sendable {
     var poolSize = 4
     var cloudflareEnabled = true
     var cloudflareDomain = ""
+    var dpiFragmentation = true
+    var disableSecure = true
     var verboseLogging = false
 
     mutating func normalize() {

@@ -12,8 +12,8 @@ android {
     defaultConfig {
         applicationId = "com.amurcanov.tgwsproxy"
         targetSdk = 35
-        versionCode = 123
-        versionName = "1.2.3"
+        versionCode = 200
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -100,7 +100,8 @@ android {
                 signingConfig = signingConfigs.getByName("release")
                 println("✅ Signing config applied: ${resolvedFile.absolutePath}")
             } else {
-                println("⚠️ WARNING: Keystore not found, using debug signing")
+                signingConfig = signingConfigs.getByName("debug")
+                println("⚠️ WARNING: Keystore not found, using debug signing so release APKs are installable")
                 println("   Looked for: ${resolvedFile?.absolutePath ?: keyFile}")
             }
         }

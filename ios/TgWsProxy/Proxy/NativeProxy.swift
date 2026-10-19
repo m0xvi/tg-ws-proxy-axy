@@ -32,6 +32,8 @@ enum NativeProxy {
         }
 
         cacheURL.path.withCString { SetCfProxyCacheDir($0) }
+        SetDpiFragmentation(configuration.dpiFragmentation ? 1 : 0)
+        SetDisableSecure(configuration.disableSecure ? 1 : 0)
         configuration.cloudflareDomain.withCString {
             SetCfProxyConfig(configuration.cloudflareEnabled ? 1 : 0, 1, $0)
         }

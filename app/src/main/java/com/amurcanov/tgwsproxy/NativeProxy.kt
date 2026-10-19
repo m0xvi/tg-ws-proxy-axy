@@ -72,11 +72,17 @@ object NativeProxy {
     }
 
     fun setDpiFragmentation(v: Boolean) {
-        ProxyLibrary.INSTANCE.SetDpiFragmentation(if (v) 1 else 0)
+        try {
+            ProxyLibrary.INSTANCE.SetDpiFragmentation(if (v) 1 else 0)
+        } catch (_: Throwable) {
+        }
     }
 
     fun notifyNetworkChanged() {
-        ProxyLibrary.INSTANCE.NotifyNetworkChanged()
+        try {
+            ProxyLibrary.INSTANCE.NotifyNetworkChanged()
+        } catch (_: Throwable) {
+        }
     }
 
     fun setForceTestDc(v: Boolean) {

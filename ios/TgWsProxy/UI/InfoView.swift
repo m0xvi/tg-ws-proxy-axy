@@ -43,10 +43,10 @@ struct InfoView: View {
     private var links: some View {
         VStack(spacing: 0) {
             LinkRow(
-                title: "Репозиторий",
-                subtitle: "reekeer/tg-ws-proxy-ios",
+                title: "Репозиторий (Android & iOS)",
+                subtitle: "m0xvi/tg-ws-proxy-axy",
                 systemImage: "iphone",
-                url: "https://github.com/reekeer/tg-ws-proxy-ios"
+                url: "https://github.com/m0xvi/tg-ws-proxy-axy"
             )
             Divider()
             LinkRow(
@@ -57,8 +57,8 @@ struct InfoView: View {
             )
             Divider()
             LinkRow(
-                title: "Rust-ядро (Android-форк)",
-                subtitle: "amurcanov/tg-ws-proxy-android",
+                title: "Upstream Android / iOS",
+                subtitle: "amurcanov · IMDelewer",
                 systemImage: "cpu",
                 url: "https://github.com/amurcanov/tg-ws-proxy-android"
             )

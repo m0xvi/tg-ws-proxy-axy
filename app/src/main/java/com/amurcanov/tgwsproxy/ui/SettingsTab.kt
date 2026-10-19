@@ -90,6 +90,8 @@ fun SettingsTab(settingsStore: SettingsStore) {
     val savedCfEnabled by settingsStore.cfproxyEnabled.collectAsStateWithLifecycle(initialValue = true)
     val savedCustomDomainEnabled by settingsStore.customCfDomainEnabled.collectAsStateWithLifecycle(initialValue = false)
     val savedCustomDomain by settingsStore.customCfDomain.collectAsStateWithLifecycle(initialValue = "")
+    val savedDpiFragmentation by settingsStore.dpiFragmentation.collectAsStateWithLifecycle(initialValue = true)
+    val savedDisableSecure by settingsStore.disableSecure.collectAsStateWithLifecycle(initialValue = true)
     val autoStartOnBoot by settingsStore.autoStartOnBoot.collectAsStateWithLifecycle(initialValue = false)
     val savedSecretKey by settingsStore.secretKey.collectAsStateWithLifecycle(initialValue = "LOADING")
 
@@ -125,6 +127,8 @@ fun SettingsTab(settingsStore: SettingsStore) {
     var cfEnabled by rememberSaveable(savedCfEnabled) { mutableStateOf(savedCfEnabled) }
     var customCfDomainEnabled by rememberSaveable(savedCustomDomainEnabled) { mutableStateOf(savedCustomDomainEnabled) }
     var customCfDomain by rememberSaveable(savedCustomDomain) { mutableStateOf(savedCustomDomain) }
+    var dpiFragmentation by rememberSaveable(savedDpiFragmentation) { mutableStateOf(savedDpiFragmentation) }
+    var disableSecure by rememberSaveable(savedDisableSecure) { mutableStateOf(savedDisableSecure) }
     var secretKeyText by remember(savedSecretKey) { mutableStateOf(if (savedSecretKey == "LOADING") "" else savedSecretKey) }
 
     LaunchedEffect(savedSecretKey) {
@@ -147,7 +151,8 @@ fun SettingsTab(settingsStore: SettingsStore) {
                 isDcAuto, dc1Text, dc2Text, dc3Text, dc4Text, dc5Text, dc203Text,
                 dc1mText, dc2mText, dc3mText, dc4mText, dc5mText, dc203mText,
                 experimentalMode, bindIpText, portText, selectedPoolSize,
-                cfEnabled, customCfDomainEnabled, customCfDomain, secretKeyText
+                cfEnabled, customCfDomainEnabled, customCfDomain, secretKeyText,
+                dpiFragmentation, disableSecure
             )
         }
     }
@@ -403,6 +408,84 @@ fun SettingsTab(settingsStore: SettingsStore) {
                     onCheckedChange = {
                         cfEnabled = it
                         isDcAuto = it
+                        scheduleSave()
+                    },
+                    enabled = !isRunning
+                )
+            }
+
+            if (cfEnabled) {
+                OutlinedTextField(
+                    value = customCfDomain,
+                    onValueChange = {
+                        customCfDomain = it.trim()
+                        customCfDomainEnabled = customCfDomain.isNotBlank()
+                        scheduleSave()
+                    },
+                    enabled = !isRunning,
+                    singleLine = true,
+                    placeholder = { Text("Свой домен или *.workers.dev (необязательно)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                    )
+                )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "DPI-фрагментация (LTE / 5G)",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "Разделение TLS ClientHello и HTTP Host против ТСПУ",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = dpiFragmentation,
+                    onCheckedChange = {
+                        dpiFragmentation = it
+                        scheduleSave()
+                    },
+                    enabled = !isRunning
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Порт 80 для Cloudflare (No TLS)",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "Обход блокировки порта 443 в мобильных сетях",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = disableSecure,
+                    onCheckedChange = {
+                        disableSecure = it
                         scheduleSave()
                     },
                     enabled = !isRunning
