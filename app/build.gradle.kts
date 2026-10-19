@@ -14,10 +14,10 @@ android {
         targetSdk = 35
         val resolvedVersionCode = (project.findProperty("appVersionCode")?.toString()?.toIntOrNull())
             ?: System.getenv("APP_VERSION_CODE")?.toIntOrNull()
-            ?: 206
+            ?: 207
         val resolvedVersionName = (project.findProperty("appVersionName")?.toString()?.trim()?.removePrefix("v"))
             ?: System.getenv("APP_VERSION_NAME")?.trim()?.removePrefix("v")
-            ?: "2.0.6"
+            ?: "2.0.7"
         versionCode = resolvedVersionCode
         versionName = resolvedVersionName
 

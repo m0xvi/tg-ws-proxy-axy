@@ -3,7 +3,11 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
+    <!-- Stylized K + Spark for KiiXY Quick Settings Tile & Toolbar -->
     <path
         android:fillColor="@android:color/white"
-        android:pathData="M5,4h14v3h-5.5v13h-3V7H5V4z" />
+        android:pathData="M5,4 L8.5,4 L8.5,10.8 L15,4 L19.2,4 L12.2,11.2 L19.6,20 L15.2,20 L9.7,13.4 L8.5,14.6 L8.5,20 L5,20 Z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M18.5,2.5 L19.3,4.7 L21.5,5.5 L19.3,6.3 L18.5,8.5 L17.7,6.3 L15.5,5.5 L17.7,4.7 Z" />
 </vector>

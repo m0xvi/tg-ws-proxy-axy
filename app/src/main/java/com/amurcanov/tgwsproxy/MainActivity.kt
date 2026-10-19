@@ -111,9 +111,9 @@ class MainActivity : ComponentActivity() {
             val themeMode by settingsStore.themeMode
                 .collectAsStateWithLifecycle(initialValue = "system")
             val isDynamicColor by settingsStore.isDynamicColor
-                .collectAsStateWithLifecycle(initialValue = true)
+                .collectAsStateWithLifecycle(initialValue = false)
             val themePalette by settingsStore.themePalette
-                .collectAsStateWithLifecycle(initialValue = "indigo")
+                .collectAsStateWithLifecycle(initialValue = "pink")
             val scope = rememberCoroutineScope()
 
             LaunchedEffect(settingsStore) {
@@ -595,7 +595,7 @@ object LogManager {
         listOf(
             LogEntry(
                 key = "init_0",
-                message = "Журнал событий TG WS Proxy AXY активен",
+                message = "Журнал событий KiiXY активен",
                 count = 1,
                 isError = false,
                 priority = 4,
@@ -665,7 +665,7 @@ object LogManager {
                 combined.addLast(
                     LogEntry(
                         key = "init_0",
-                        message = "Журнал событий TG WS Proxy AXY активен",
+                        message = "Журнал событий KiiXY активен",
                         count = 1,
                         isError = false,
                         priority = 4,

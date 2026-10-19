@@ -621,7 +621,7 @@ static NATIVE_LOG_RING: Lazy<parking_lot::Mutex<std::collections::VecDeque<Nativ
             seq: 0,
             prio: 4,
             count: 1,
-            msg: "Ядро TG WS Proxy AXY инициализировано".to_string(),
+            msg: "Ядро KiiXY инициализировано".to_string(),
         });
         parking_lot::Mutex::new(q)
     });
@@ -674,6 +674,11 @@ fn emit(prefix: &str, msg: &str) {
     if trimmed.contains("WS session closed") {
         if let Some((before, _)) = trimmed.split_once(": ^") {
             trimmed = before.trim();
+        }
+    }
+    if trimmed.starts_with("[127.0.0.1:") {
+        if let Some((_, rest)) = trimmed.split_once("] ") {
+            trimmed = rest.trim();
         }
     }
 

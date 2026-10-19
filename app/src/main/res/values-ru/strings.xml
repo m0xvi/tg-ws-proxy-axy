@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">TG WS Proxy AXY</string>
+    <string name="app_name">KiiXY</string>
     <string name="status_connecting">Подключение</string>
     <string name="status_connected">Подключено</string>
     <string name="status_disconnected">Отключено</string>
@@ -56,7 +56,7 @@
     <string name="about_project">О проекте</string>
     <string name="android_author">Автор проекта</string>
     <string name="android_author_subtitle">GitHub профиль m0xvi</string>
-    <string name="android_fork_repo">Репозиторий TG WS Proxy AXY</string>
+    <string name="android_fork_repo">Репозиторий KiiXY</string>
     <string name="android_fork_repo_subtitle">Единый репозиторий Android, iOS и Rust-ядра</string>
     <string name="original_tg_ws_proxy">Релизы и сборки (APK / IPA)</string>
     <string name="original_tg_ws_proxy_subtitle">Скачивание актуальных версий из GitHub Releases</string>

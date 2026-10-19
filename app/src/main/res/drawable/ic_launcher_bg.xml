@@ -10,13 +10,14 @@
             <gradient
                 android:type="radial"
                 android:centerX="54"
-                android:centerY="46"
+                android:centerY="44"
                 android:gradientRadius="78"
-                android:startColor="#2E1065"
-                android:endColor="#090514" />
+                android:startColor="#560D35"
+                android:endColor="#14040D" />
         </aapt:attr>
     </path>
+    <!-- Soft glowing pink outer aura -->
     <path
-        android:fillColor="#1A10B981"
-        android:pathData="M54,18 L82,34 L82,68 L54,88 L26,68 L26,34 Z" />
+        android:fillColor="#26FF4081"
+        android:pathData="M54,16 L84,33 L84,69 L54,90 L24,69 L24,33 Z" />
 </vector>

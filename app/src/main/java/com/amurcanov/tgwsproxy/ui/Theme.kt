@@ -189,11 +189,75 @@ private val ForestDarkColorScheme = darkColorScheme(
     outlineVariant = Color(0xFF48454E),
 )
 
+// ═══ Розовая палитра — «KiiXY Pink» (по умолчанию) ═══
+private val PinkLightColorScheme = lightColorScheme(
+    primary = Color(0xFFD81B60),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFFFD8E4),
+    onPrimaryContainer = Color(0xFF3E001D),
+    secondary = Color(0xFFEC407A),
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFFFFE0EA),
+    onSecondaryContainer = Color(0xFF3E001D),
+    tertiary = Color(0xFFF06292),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFFFFD8E4),
+    onTertiaryContainer = Color(0xFF3E001D),
+    background = Color(0xFFFFF8F9),
+    onBackground = Color(0xFF22191C),
+    surface = Color(0xFFFFF0F4),
+    onSurface = Color(0xFF22191C),
+    surfaceVariant = Color(0xFFF5DCE3),
+    onSurfaceVariant = Color(0xFF524347),
+    outline = Color(0xFF857377),
+    outlineVariant = Color(0xFFD8C1C6),
+    error = Color(0xFFBA1A1A),
+    onError = Color(0xFFFFFFFF),
+    errorContainer = Color(0xFFFFDAD6),
+    onErrorContainer = Color(0xFF410002),
+    inverseSurface = Color(0xFF382E31),
+    inverseOnSurface = Color(0xFFFEEDF0),
+    inversePrimary = Color(0xFFFFB0C8),
+    surfaceTint = Color(0xFFD81B60),
+)
+
+private val PinkDarkColorScheme = darkColorScheme(
+    primary = Color(0xFFFF80AB),
+    onPrimary = Color(0xFF560027),
+    primaryContainer = Color(0xFF880E4F),
+    onPrimaryContainer = Color(0xFFFFD8E4),
+    secondary = Color(0xFFF48FB1),
+    onSecondary = Color(0xFF560027),
+    secondaryContainer = Color(0xFF6A1B4D),
+    onSecondaryContainer = Color(0xFFFFD8E4),
+    tertiary = Color(0xFFFF4081),
+    onTertiary = Color(0xFFFFFFFF),
+    tertiaryContainer = Color(0xFF7B1FA2),
+    onTertiaryContainer = Color(0xFFFFD8E4),
+    background = Color(0xFF161013),
+    onBackground = Color(0xFFEFDFE2),
+    surface = Color(0xFF21181C),
+    onSurface = Color(0xFFEFDFE2),
+    surfaceVariant = Color(0xFF3D2C33),
+    onSurfaceVariant = Color(0xFFD8C1C6),
+    outline = Color(0xFF9F8C90),
+    outlineVariant = Color(0xFF524347),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005),
+    errorContainer = Color(0xFF93000A),
+    onErrorContainer = Color(0xFFFFDAD6),
+    inverseSurface = Color(0xFFEFDFE2),
+    inverseOnSurface = Color(0xFF382E31),
+    inversePrimary = Color(0xFFD81B60),
+    surfaceTint = Color(0xFFFF80AB),
+)
+
 private fun getAppColorScheme(palette: String, isDark: Boolean): androidx.compose.material3.ColorScheme {
     return when(palette) {
         "espresso" -> if (isDark) DarkColorScheme else LightColorScheme
         "forest" -> if (isDark) ForestDarkColorScheme else ForestLightColorScheme
-        else -> if (isDark) IndigoDarkColorScheme else IndigoLightColorScheme
+        "indigo" -> if (isDark) IndigoDarkColorScheme else IndigoLightColorScheme
+        else -> if (isDark) PinkDarkColorScheme else PinkLightColorScheme
     }
 }
 
@@ -229,8 +293,8 @@ object AppColors {
 @Composable
 fun TgWsProxyTheme(
     themeMode: String = "system",
-    dynamicColor: Boolean = true,
-    themePalette: String = "indigo",
+    dynamicColor: Boolean = false,
+    themePalette: String = "pink",
     content: @Composable () -> Unit
 ) {
     val darkTheme = when (themeMode) {

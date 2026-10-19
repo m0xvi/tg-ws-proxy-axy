@@ -1821,21 +1821,38 @@ async fn serve_core<R, W>(
     // _try_handshake: key = SHA256(prekey + secret).
     let clt_dec_prekey = &handshake[SKIP_LEN..SKIP_LEN + PREKEY_LEN];
     let clt_dec_iv = &handshake[SKIP_LEN + PREKEY_LEN..SKIP_LEN + PREKEY_LEN + IV_LEN];
+    let mut effective_secret = secret_bytes;
     let mut hash_dec = Sha256::new();
     hash_dec.update(clt_dec_prekey);
-    hash_dec.update(&secret_bytes);
+    hash_dec.update(&effective_secret);
     let mut clt_decryptor = new_aes_ctr(&hash_dec.finalize(), clt_dec_iv);
 
     let mut decrypted = handshake;
     clt_decryptor.xor(&mut decrypted);
 
-    let proto_tag = &decrypted[PROTO_TAG_POS..PROTO_TAG_POS + 4];
-    let proto = LittleEndian::read_u32(proto_tag);
+    let mut proto = LittleEndian::read_u32(&decrypted[PROTO_TAG_POS..PROTO_TAG_POS + 4]);
     if !valid_proto(proto) {
-        STATS.connections_bad.fetch_add(1, Ordering::Relaxed);
-        lwarn!("[{}] bad handshake (wrong secret or proto)", label);
-        return;
+        // Fallback: если в Telegram остался прокси со стандартным нулевым ключом 0000...0000
+        let zero_secret = [0u8; 16];
+        let mut hash_zero = Sha256::new();
+        hash_zero.update(clt_dec_prekey);
+        hash_zero.update(&zero_secret);
+        let mut zero_dec = new_aes_ctr(&hash_zero.finalize(), clt_dec_iv);
+        let mut dec_zero = handshake;
+        zero_dec.xor(&mut dec_zero);
+        let p_zero = LittleEndian::read_u32(&dec_zero[PROTO_TAG_POS..PROTO_TAG_POS + 4]);
+        if valid_proto(p_zero) {
+            clt_decryptor = zero_dec;
+            decrypted = dec_zero;
+            proto = p_zero;
+            effective_secret = zero_secret.to_vec();
+        } else {
+            STATS.connections_bad.fetch_add(1, Ordering::Relaxed);
+            ldebug!("[{}] bad handshake (wrong secret or proto)", label);
+            return;
+        }
     }
+    let proto_tag = &decrypted[PROTO_TAG_POS..PROTO_TAG_POS + 4];
 
     let dc_raw = LittleEndian::read_u16(&decrypted[DC_IDX_POS..DC_IDX_POS + 2]) as i16;
     let mut dc = dc_raw as i32;
@@ -1916,7 +1933,7 @@ async fn serve_core<R, W>(
     }
     let mut hash_enc = Sha256::new();
     hash_enc.update(&clt_enc_prekey_and_iv[..32]);
-    hash_enc.update(&secret_bytes);
+    hash_enc.update(&effective_secret);
     let clt_encryptor = new_aes_ctr(&hash_enc.finalize(), &clt_enc_prekey_and_iv[32..]);
 
     let dc_key = DcKey::new(dc, is_media, is_test_dc);

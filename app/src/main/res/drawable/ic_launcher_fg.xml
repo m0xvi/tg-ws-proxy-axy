@@ -4,22 +4,23 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Outer Emerald-Cyan Shield -->
+    <!-- Outer Pink/Rose Hexagon Shield -->
     <path
-        android:fillColor="#10B981"
-        android:pathData="M54,24 L76,36 L76,62 C76,73 66,81 54,86 C42,81 32,73 32,62 L32,36 Z" />
+        android:fillColor="#FF4081"
+        android:pathData="M54,22 L78,35 L78,63 C78,75 67,83 54,88 C41,83 30,75 30,63 L30,35 Z" />
     <path
-        android:fillColor="#059669"
-        android:pathData="M54,24 L76,36 L76,62 C76,73 66,81 54,86 Z" />
-    <!-- Inner Dark Core -->
+        android:fillColor="#D81B60"
+        android:pathData="M54,22 L78,35 L78,63 C78,75 67,83 54,88 Z" />
+    <!-- Inner Dark Berry Core -->
     <path
-        android:fillColor="#1E1B4B"
-        android:pathData="M54,30 L70,39 L70,60 C70,69 62,75 54,79 C46,75 38,69 38,60 L38,39 Z" />
-    <!-- Lightning Bolt / Fast Route Symbol -->
+        android:fillColor="#280619"
+        android:pathData="M54,28 L72,38 L72,61 C72,71 63,77 54,81 C45,77 36,71 36,61 L36,38 Z" />
+    <!-- Stylized "K" for KiiXY -->
     <path
-        android:fillColor="#38BDF8"
-        android:pathData="M57,34 L43,55 L53,55 L49,74 L65,51 L55,51 Z" />
+        android:fillColor="#FFFFFF"
+        android:pathData="M42,38 L48,38 L48,51 L60,38 L68,38 L55,52 L69,70 L61,70 L50,56 L48,58 L48,70 L42,70 Z" />
+    <!-- Pink Spark Accent -->
     <path
-        android:fillColor="#F8FAFC"
-        android:pathData="M57,34 L46,52 L54,52 L51,67 L62,51 L54,51 Z" />
+        android:fillColor="#FF80AB"
+        android:pathData="M62,33 L64,38 L69,40 L64,42 L62,47 L60,42 L55,40 L60,38 Z" />
 </vector>

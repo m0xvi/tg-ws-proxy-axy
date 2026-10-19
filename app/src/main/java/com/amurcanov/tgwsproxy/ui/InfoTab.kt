@@ -105,7 +105,7 @@ private const val DeveloperProfileUrl = "https://github.com/m0xvi"
 private const val OriginalProjectUrl = "https://github.com/m0xvi/tg-ws-proxy-axy/releases"
 private const val ProxyReferenceUrl = "https://github.com/m0xvi/tg-ws-proxy-axy/issues"
 
-private val DonateActionButtonColor = Color(0xFF00AEA5)
+private val DonateActionButtonColor = Color(0xFFD81B60)
 
 private val Android16BlobShape: Shape = GenericShape { size, _ ->
     val centerX = size.width / 2f
@@ -590,7 +590,7 @@ private fun InfoHeroCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HeroMetaPill(
-                        text = "AXY Core 2.0",
+                        text = "KiiXY Core 2.0",
                         containerColor = glassColor,
                         borderColor = glassBorder,
                         modifier = Modifier.weight(1f)
@@ -605,7 +605,7 @@ private fun InfoHeroCard(
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "TG WS Proxy AXY",
+                        text = "KiiXY",
                         style = MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.Black,
                             fontSize = 30.sp,

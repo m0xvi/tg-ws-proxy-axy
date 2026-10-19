@@ -26,8 +26,8 @@ class SettingsStore(private val context: Context) {
 
     private object Keys {
         val THEME_MODE = stringPreferencesKey("theme_mode")
-        val IS_DYNAMIC_COLOR = booleanPreferencesKey("is_dynamic_color")
-        val THEME_PALETTE = stringPreferencesKey("theme_palette")
+        val IS_DYNAMIC_COLOR = booleanPreferencesKey("is_dynamic_color_kiixy")
+        val THEME_PALETTE = stringPreferencesKey("theme_palette_kiixy")
         val IS_DC_AUTO = booleanPreferencesKey("is_dc_auto")
         val DC1 = stringPreferencesKey("dc1")
         val DC2 = stringPreferencesKey("dc2")
@@ -66,8 +66,8 @@ class SettingsStore(private val context: Context) {
     val isReady: Flow<Boolean> = context.dataStore.data.map { true }
     val isExperimentalMode: Flow<Boolean> = context.dataStore.data.map { it[Keys.IS_EXPERIMENTAL_MODE] ?: false }
     val themeMode: Flow<String> = context.dataStore.data.map { it[Keys.THEME_MODE] ?: "system" }
-    val isDynamicColor: Flow<Boolean> = context.dataStore.data.map { it[Keys.IS_DYNAMIC_COLOR] ?: true }
-    val themePalette: Flow<String> = context.dataStore.data.map { it[Keys.THEME_PALETTE] ?: "indigo" }
+    val isDynamicColor: Flow<Boolean> = context.dataStore.data.map { it[Keys.IS_DYNAMIC_COLOR] ?: false }
+    val themePalette: Flow<String> = context.dataStore.data.map { it[Keys.THEME_PALETTE] ?: "pink" }
     val isDcAuto: Flow<Boolean> = context.dataStore.data.map { it[Keys.IS_DC_AUTO] ?: true }
     val dc1: Flow<String> = context.dataStore.data.map { it[Keys.DC1] ?: "" }
     val dc2: Flow<String> = context.dataStore.data.map { it[Keys.DC2] ?: DEFAULT_DIRECT_DC2_IP }

@@ -161,7 +161,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag_name }}
-          name: "TG WS Proxy Universal ${{ steps.tag.outputs.tag_name }}"
+          name: "KiiXY ${{ steps.tag.outputs.tag_name }}"
           generate_release_notes: true
           files: |
             release-assets/*.apk
