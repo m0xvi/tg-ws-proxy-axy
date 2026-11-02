@@ -1269,6 +1269,11 @@ async fn try_cfproxy_base_domain(
         );
         return (None, String::new());
     }
+    // Анти-шторм: во время деградации провайдера не запускаем 6×7 сокетов
+    // на каждое клиентское соединение, а сразу уходим в прямой fallback.
+    if crate::cfproxy::cf_network_cooldown_active() {
+        return (None, String::new());
+    }
     let _permit = match acquire_cfproxy_attempt_slot().await {
         Some(p) => p,
         None => return (None, String::new()),
@@ -1291,6 +1296,7 @@ async fn try_cfproxy_base_domain(
         ldebug!(" CF worker-style try {} ({})", base_domain, worker_path);
         let (ws, resolved_ip, err) = cf_connect_domain(&base_domain, &worker_path, 5.0).await;
         if let Some(e) = err {
+            crate::cfproxy::note_cf_attempt_failure();
             if is_http_status_error(&e, 429) {
                 mark_cfproxy_429_cooldown(&base_domain, &e);
             }
@@ -1300,6 +1306,7 @@ async fn try_cfproxy_base_domain(
             );
             return (None, String::new());
         }
+        crate::cfproxy::note_cf_attempt_success();
         clear_cfproxy_429_cooldown(&base_domain);
         if !resolved_ip.is_empty() {
             ldebug!(" CF worker-style ok {} via {}", base_domain, resolved_ip);
@@ -1312,6 +1319,7 @@ async fn try_cfproxy_base_domain(
 
     let (ws, resolved_ip, err) = cf_connect_domain(&domain, ws_path, 5.0).await;
     if let Some(e) = err {
+        crate::cfproxy::note_cf_attempt_failure();
         // Если пользователь ввёл собственный домен, который настроен как единый Worker/Reverse-Proxy
         // без поддоменов kws1..5, автоматически пробуем корневой домен с ?dst=...&dc=...
         if is_user_domain && !is_http_status_error(&e, 429) {
@@ -1328,6 +1336,7 @@ async fn try_cfproxy_base_domain(
             );
             let (w_ws, w_ip, w_err) = cf_connect_domain(&base_domain, &worker_path, 5.0).await;
             if w_err.is_none() && w_ws.is_some() {
+                crate::cfproxy::note_cf_attempt_success();
                 clear_cfproxy_429_cooldown(&base_domain);
                 if !w_ip.is_empty() {
                     ldebug!(" CF root domain ok {} via {}", base_domain, w_ip);
@@ -1352,6 +1361,7 @@ async fn try_cfproxy_base_domain(
         return (None, String::new());
     }
 
+    crate::cfproxy::note_cf_attempt_success();
     clear_cfproxy_429_cooldown(&base_domain);
     if !resolved_ip.is_empty() {
         ldebug!(" CF ok {} via {}", domain, resolved_ip);
@@ -1449,7 +1459,15 @@ async fn cfproxy_acquire_ws(
             Some((w, chosen_domain))
         }
         None => {
-            lwarn!(" CF fallback DC{}{}: все CF домены недоступны", dc, m_tag);
+            if crate::cfproxy::cf_network_cooldown_active() {
+                lwarn!(
+                    " CF fallback DC{}{}: пауза после шторма отказов -> прямой fallback",
+                    dc,
+                    m_tag
+                );
+            } else {
+                lwarn!(" CF fallback DC{}{}: все CF домены недоступны", dc, m_tag);
+            }
             None
         }
     }
@@ -1487,7 +1505,10 @@ where
     let use_cf = CFPROXY_ENABLED.load(Ordering::Relaxed) && !is_test;
     let worker_domains = CF_WORKER_DOMAINS.read().clone();
     let ws_path = ws_path_for(is_test);
-    let secure_port = if DISABLE_SECURE.load(Ordering::Relaxed) { 80 } else { 443 };
+    // Прямой TCP к датацентрам Telegram ВСЕГДА идёт по 443. Настройка
+    // DISABLE_SECURE ("порт 80 для Cloudflare") относится только к Worker/CF,
+    // раньше она ошибочно отправляла TCP fallback на режущийся :80.
+    let tcp_port = 443u16;
     let use_worker = !worker_domains.is_empty() && !fallback_dst.is_empty() && !is_test;
 
     // Шаг 1: worker-ws (без halves) — порт _cfproxy_worker_fallback.
@@ -1623,20 +1644,22 @@ where
                 }
             }
         }
-        return false;
+        // CF исчерпан — НЕ обрываем клиентское соединение. Раньше здесь был
+        // `return false`, из-за чего при включённом Cloudflare ядро никогда
+        // не доходило до TCP fallback и писало "no fallback available".
     }
 
     // Шаг 3: tcp.
     if !fallback_dst.is_empty() {
         linfo!(
             "[{}] DC{}{} -> TCP fallback to {}:{}",
-            label, dc, m_tag, fallback_dst, secure_port
+            label, dc, m_tag, fallback_dst, tcp_port
         );
         return tcp_fallback(
             conn_read,
             conn_write,
             &fallback_dst,
-            secure_port,
+            tcp_port,
             relay_init,
             label,
             (
@@ -2332,13 +2355,21 @@ pub fn notify_network_changed() {
     DC_FAIL_UNTIL.write().clear();
     IP_FAIL_UNTIL.write().clear();
     CFPROXY_429.write().clear();
+    // НЕ выжигаем DNS-кеш, sticky-IP и штраф порта 80: сразу после
+    // Wi-Fi ↔ LTE системный резолвер недоступен, а оператор продолжает
+    // резать :80. Раньше полная очистка давала лавину
+    // "failed to lookup address information" и возврат на блокируемый порт.
     crate::cfproxy::clear_doh_cache();
     crate::cfproxy::clear_cf_fast_route();
-    linfo!(" Сеть изменилась: сброшены кеши DNS/маршрутов и кулдауны DC");
+    linfo!(" Сеть изменилась: кулдауны DC сброшены, DNS/порт 80 сохранены, пулы обновятся через 1.5с");
 
     if let Some(pools) = ACTIVE_POOLS.read().clone() {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
+                // Даём сети реально подняться: мгновенный reset+warmup после
+                // события переключения создавал thundering herd из десятков
+                // одновременных DNS/WS-попыток.
+                tokio::time::sleep(Duration::from_millis(1500)).await;
                 pools.reset().await;
                 let map = DC_OPT.read().clone();
                 if !map.is_empty() {

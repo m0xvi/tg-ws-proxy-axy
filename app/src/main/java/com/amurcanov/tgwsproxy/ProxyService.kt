@@ -23,6 +23,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
+import java.net.Socket
 
 class ProxyService : Service() {
 
@@ -51,6 +52,11 @@ class ProxyService : Service() {
     private var lastDisableSecure: Boolean = true
     private var lastSecretKey: String = ""
 
+    // Принудительная проверка живости: Rust-ядро могло потерять слушатель,
+    // хотя foreground-сервис ещё числится запущенным.
+    private var lastHealthCheckMs = 0L
+    private var consecutiveHealthFailures = 0
+
     companion object {
         const val ACTION_START = "com.amurcanov.tgwsproxy.START"
         const val ACTION_STOP = "com.amurcanov.tgwsproxy.STOP"
@@ -78,6 +84,9 @@ class ProxyService : Service() {
         private const val STATS_UPDATE_MS = 3_000L
         private const val NOTIFICATION_MIN_UPDATE_MS = 3_000L
         private const val NATIVE_STOP_WAIT_MS = 3_000L
+        private const val HEALTH_CHECK_MS = 10_000L
+        private const val HEALTH_FAILURES_BEFORE_RESTART = 2
+        private const val HEALTH_CONNECT_TIMEOUT_MS = 1_000
 
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning
@@ -159,6 +168,8 @@ class ProxyService : Service() {
         lastDpiFragmentation = dpiFragmentation
         lastDisableSecure = disableSecure
         lastSecretKey = secretKey
+        lastHealthCheckMs = 0L
+        consecutiveHealthFailures = 0
         notificationStartedAtMs = System.currentTimeMillis()
         lastNotificationContent = getString(R.string.notification_starting)
         lastNotificationAtMs = notificationStartedAtMs
@@ -253,15 +264,47 @@ class ProxyService : Service() {
                 if (_isRunning.value && !stopInProgress) {
                     try {
                         LogManager.syncFromNative()
-                        val rawStats = NativeProxy.getStats() ?: continue
-                        val upRaw = extractStat(rawStats, "up=")
-                        val downRaw = extractStat(rawStats, "down=")
-                        val activeConns = extractStat(rawStats, "active=")
-                        
-                        val totalBytes = parseHumanBytes(upRaw) + parseHumanBytes(downRaw)
-                        val active = activeConns.toIntOrNull() ?: 0
-                        val text = getString(R.string.notification_traffic, formatBytes(totalBytes), active)
-                        updateNotification(text)
+                        val rawStats = NativeProxy.getStats()
+                        if (rawStats != null) {
+                            val upRaw = extractStat(rawStats, "up=")
+                            val downRaw = extractStat(rawStats, "down=")
+                            val activeConns = extractStat(rawStats, "active=")
+
+                            val totalBytes = parseHumanBytes(upRaw) + parseHumanBytes(downRaw)
+                            val active = activeConns.toIntOrNull() ?: 0
+                            val text = getString(R.string.notification_traffic, formatBytes(totalBytes), active)
+                            updateNotification(text)
+                        }
+
+                        // Принудительная проверка: foreground-сервис ещё жив,
+                        // но TCP-слушатель Rust-ядра мог уже умереть.
+                        val now = System.currentTimeMillis()
+                        if (now - lastHealthCheckMs >= HEALTH_CHECK_MS && restartJob?.isActive != true) {
+                            lastHealthCheckMs = now
+                            if (isProxyAlive()) {
+                                if (consecutiveHealthFailures > 0) {
+                                    Log.i(TAG, "Health check recovered")
+                                    LogManager.appendKotlinLog("Проверка фона: прокси отвечает", 4)
+                                }
+                                consecutiveHealthFailures = 0
+                            } else {
+                                consecutiveHealthFailures++
+                                Log.w(TAG, "Health check failed ($consecutiveHealthFailures)")
+                                LogManager.appendKotlinLog(
+                                    "Проверка фона: прокси не отвечает ($consecutiveHealthFailures)",
+                                    5
+                                )
+                                if (consecutiveHealthFailures >= HEALTH_FAILURES_BEFORE_RESTART) {
+                                    Log.w(TAG, "Restarting proxy after failed health checks")
+                                    LogManager.appendKotlinLog(
+                                        "Принудительный перезапуск прокси по результатам проверки",
+                                        5
+                                    )
+                                    restartProxy()
+                                    return@launch
+                                }
+                            }
+                        }
                     } catch (e: Exception) {
                         Log.w(TAG, "Stats update failed", e)
                     }
@@ -345,6 +388,31 @@ class ProxyService : Service() {
         if (bytes < 1024 * 1024) return "%.1fKB".format(bytes / 1024)
         if (bytes < 1024 * 1024 * 1024) return "%.1fMB".format(bytes / (1024 * 1024))
         return "%.2fGB".format(bytes / (1024 * 1024 * 1024))
+    }
+
+    /**
+     * Проверяем именно TCP-слушатель, а не только флаг сервиса: на некоторых
+     * прошивках нативный сокет закрывается раньше, чем система убивает сервис.
+     */
+    private fun isProxyAlive(): Boolean {
+        val configured = when (lastBindIp) {
+            "0.0.0.0", "::", "" -> "127.0.0.1"
+            else -> lastBindIp
+        }
+        val hosts = linkedSetOf(configured, "127.0.0.1")
+        for (host in hosts) {
+            try {
+                Socket().use { socket ->
+                    socket.connect(
+                        InetSocketAddress(InetAddress.getByName(host), lastPort),
+                        HEALTH_CONNECT_TIMEOUT_MS
+                    )
+                    return true
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return false
     }
 
     private fun stopProxy() {

@@ -1,7 +1,7 @@
+import CoreLocation
 import Foundation
-import Network
-import os
 import SwiftUI
+import UIKit
 
 @MainActor
 final class ProxyViewModel: ObservableObject {
@@ -20,15 +20,33 @@ final class ProxyViewModel: ObservableObject {
         didSet { persistConfiguration() }
     }
 
+    // Результат принудительных проверок, видимый пользователю в UI.
+    @Published private(set) var lastHealthCheck: Date?
+    @Published private(set) var healthMessage: String = "Проверка ещё не выполнялась".tgLoc
+    @Published private(set) var healthIsOK = false
+    @Published private(set) var recoveryCount = 0
+    @Published private(set) var backgroundDiagnostics = ""
+
     private var lastSample: (up: Double, down: Double, at: Date)?
     private static let trafficWindow = 40
 
     private var statsTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var eventTask: Task<Void, Never>?
+    private var backgroundBurstTask: Task<Void, Never>?
+    private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     private var startAttempt = 0
     private let engine: ProxyEngine = ProxyEngineFactory.make()
     private static let settingsKey = "proxy.configuration.v1"
     private static let maxReconnectAttempts = 3
+    private static let maxRecoveryAttempts = 3
+
+    private var healthFailures = 0
+    private var recoveryStreak = 0
+    private var lastRecoveryAt: Date = .distantPast
+    private var lastForcedCheckAt: Date = .distantPast
+    private var isCheckingHealth = false
+    private var isRecovering = false
 
     private var reconnectEnabled: Bool {
         UserDefaults.standard.object(forKey: "app.reconnect") as? Bool ?? true
@@ -43,6 +61,8 @@ final class ProxyViewModel: ObservableObject {
             configuration = ProxyConfiguration()
         }
         reloadCloudflareDomains()
+        ProxyHealthEvents.start()
+        startObservingEvents()
     }
 
     var isRunning: Bool {
@@ -85,6 +105,8 @@ final class ProxyViewModel: ObservableObject {
         DC override: \(c.dcAddresses.isEmpty ? "—" : c.dcAddresses)
         Статистика: всего \(s.total), активных \(s.active), ws \(s.webSockets), \
         ↑\(s.uploaded) ↓\(s.downloaded), ошибок \(s.errors)
+        Здоровье: \(healthIsOK ? "OK" : "нет ответа"), \(healthMessage)
+        Восстановлений: \(recoveryCount)
         """
     }
 
@@ -99,21 +121,25 @@ final class ProxyViewModel: ObservableObject {
     }
 
     func start(isRetry: Bool = false) {
-        guard state != .starting, !isRunning else { return }
+        // Раньше `handleStartFailure()` оставлял state = .starting и повторные
+        // попытки молча отбрасывались этим guard. Разрешаем ретрай.
+        guard (isRetry || state != .starting), !isRunning else { return }
         if !isRetry { startAttempt = 0 }
+        ProxyHealthSettings.setShouldBeRunning(true)
         reconnectTask?.cancel()
         state = .starting
 
         let configuration = configuration
-        Task {
-            let result = await engine.start(configuration)
+        Task { await self.performStart(configuration) }
+    }
 
-            if result == 0 {
-                startAttempt = 0
-                didStart()
-            } else {
-                handleStartFailure(result)
-            }
+    private func performStart(_ configuration: ProxyConfiguration) async {
+        let result = await engine.start(configuration)
+        if result == 0 {
+            startAttempt = 0
+            didStart()
+        } else {
+            handleStartFailure(result)
         }
     }
 
@@ -122,19 +148,30 @@ final class ProxyViewModel: ObservableObject {
     }
 
     func stopAndWait(notify: Bool = true) async {
-        guard state != .stopped else { return }
+        guard state != .stopped else {
+            ProxyHealthSettings.setShouldBeRunning(false)
+            BackgroundHealthTasks.cancel()
+            return
+        }
         let wasRunning = isRunning
+        ProxyHealthSettings.setShouldBeRunning(false)
+        BackgroundHealthTasks.cancel()
+        endBackgroundBurst()
         reconnectTask?.cancel()
         reconnectTask = nil
         statsTask?.cancel()
         statsTask = nil
         startAttempt = 0
+        recoveryStreak = 0
+        healthFailures = 0
         state = .stopped
         await engine.stop()
         BackgroundKeeper.shared.deactivate()
         stats = .empty
         traffic = []
         lastSample = nil
+        healthIsOK = false
+        healthMessage = "Прокси остановлен".tgLoc
         if notify, wasRunning {
             NotificationManager.post(title: "TG WS Proxy", body: "Прокси остановлен")
         }
@@ -154,6 +191,127 @@ final class ProxyViewModel: ObservableObject {
         }
     }
 
+    /// Восстановление после того, как iOS убила приложение. `autoStart` больше
+    /// не единственный источник истины: важно намерение пользователя.
+    func resumeIfNeeded(autoStartRequested: Bool) async {
+        if ProxyHealthSettings.shouldBeRunning {
+            await forceHealthCheck(reason: "launch")
+        } else if autoStartRequested {
+            start()
+        }
+    }
+
+    /// Принудительная проверка. Вызывается по таймеру, при смене сцены, сети,
+    /// статуса VPN, из BGAppRefreshTask и по кнопке «Проверить и восстановить».
+    func forceHealthCheck(reason: String) async {
+        guard ProxyHealthSettings.isEnabled || reason == "manual" || reason == "launch" else {
+            return
+        }
+        guard !isCheckingHealth else { return }
+        let now = Date()
+        if reason != "manual", now.timeIntervalSince(lastForcedCheckAt) < 2 { return }
+        lastForcedCheckAt = now
+        isCheckingHealth = true
+        defer { isCheckingHealth = false }
+
+        await updateBackgroundDiagnostics()
+
+        // Пользователь остановил прокси, но процесс/туннель ещё жив — гасим.
+        guard ProxyHealthSettings.shouldBeRunning else {
+            if await engine.health(configuration) {
+                await engine.stop()
+            }
+            healthIsOK = false
+            healthMessage = "Прокси остановлен".tgLoc
+            lastHealthCheck = Date()
+            return
+        }
+
+        guard state != .starting else {
+            lastHealthCheck = Date()
+            return
+        }
+
+        let healthy = await engine.health(configuration)
+        lastHealthCheck = Date()
+
+        if healthy {
+            healthFailures = 0
+            healthIsOK = true
+            healthMessage = "Прокси отвечает".tgLoc
+            if Date().timeIntervalSince(lastRecoveryAt) > 60 {
+                recoveryStreak = 0
+            }
+            // После перезапуска приложения туннель мог остаться живым:
+            // поднимаем UI и статистику без перезапуска ядра.
+            if state != .running {
+                didStart(announce: false)
+            }
+            return
+        }
+
+        healthFailures += 1
+        healthIsOK = false
+        healthMessage = "Прокси не отвечает, восстанавливаем…".tgLoc
+        fputs("TGWS health check failed (\(reason)), failures=\(healthFailures)\n", stderr)
+
+        // Два провала подряд отсекают кратковременные сетевые «мигания»;
+        // ручная проверка и проверка при запуске восстанавливают сразу.
+        guard reason == "manual" || reason == "launch" || healthFailures >= 2 else {
+            return
+        }
+        // Не спамим ошибками и уведомлениями, пока не пройдёт окно ретраев.
+        if reason != "manual",
+           recoveryStreak >= Self.maxRecoveryAttempts,
+           Date().timeIntervalSince(lastRecoveryAt) < 600 {
+            healthMessage = "Не удалось восстановить прокси".tgLoc
+            return
+        }
+        if reason == "manual" { recoveryStreak = 0 }
+        await recover(reason: reason)
+    }
+
+    private func recover(reason: String) async {
+        guard !isRecovering else { return }
+        isRecovering = true
+        defer { isRecovering = false }
+
+        // Через 10 минут даём автоматике новую серию попыток.
+        if Date().timeIntervalSince(lastRecoveryAt) > 600 {
+            recoveryStreak = 0
+        }
+        guard recoveryStreak < Self.maxRecoveryAttempts else {
+            didFail("Не удалось восстановить прокси".tgLoc)
+            return
+        }
+
+        recoveryStreak += 1
+        lastRecoveryAt = Date()
+        healthMessage = "Восстанавливаем прокси…".tgLoc
+        fputs("TGWS: recovering proxy after \(reason) (attempt \(recoveryStreak))\n", stderr)
+        NotificationManager.post(title: "TG WS Proxy", body: "Фоновая проверка: перезапуск прокси")
+
+        statsTask?.cancel()
+        statsTask = nil
+        startAttempt = 0
+        state = .starting
+        await engine.stop()
+        BackgroundKeeper.shared.deactivate()
+
+        let result = await engine.start(configuration)
+        if result == 0 {
+            didStart(announce: false)
+            recoveryCount += 1
+            healthIsOK = true
+            healthMessage = "Прокси восстановлен".tgLoc
+            fputs("TGWS: proxy recovered after \(reason)\n", stderr)
+            NotificationManager.post(title: "TG WS Proxy", body: "Прокси восстановлен после проверки")
+        } else {
+            healthMessage = "Не удалось восстановить прокси".tgLoc
+            handleStartFailure(result)
+        }
+    }
+
     private func handleStartFailure(_ result: Int32) {
         let message = NativeProxyError.startFailed(result).localizedDescription
         if reconnectEnabled, startAttempt < Self.maxReconnectAttempts {
@@ -168,6 +326,162 @@ final class ProxyViewModel: ObservableObject {
         } else {
             didFail(message)
         }
+    }
+
+    private func startObservingEvents() {
+        eventTask = Task { [weak self] in
+            let stream = NotificationCenter.default.notifications(named: .tgwsForceHealthCheck)
+            for await _ in stream {
+                guard let self else { return }
+                await self.forceHealthCheck(reason: "event")
+            }
+        }
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            endBackgroundBurst()
+            Task { await self.forceHealthCheck(reason: "foreground") }
+        case .background:
+            beginBackgroundChecks()
+        case .inactive:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    private func beginBackgroundChecks() {
+        guard ProxyHealthSettings.shouldBeRunning else {
+            BackgroundHealthTasks.cancel()
+            return
+        }
+        BackgroundHealthTasks.scheduleNext()
+        endBackgroundBurst()
+
+        let id = UIApplication.shared.beginBackgroundTask(withName: "TgWsProxy.HealthCheck") { [weak self] in
+            Task { @MainActor in self?.endBackgroundBurst() }
+        }
+        backgroundTaskID = id
+        backgroundBurstTask = Task { [weak self] in
+            for _ in 0..<5 {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled,
+                      let self,
+                      ProxyHealthSettings.shouldBeRunning else { break }
+                await self.forceHealthCheck(reason: "background")
+            }
+            self?.endBackgroundBurst()
+        }
+    }
+
+    private func endBackgroundBurst() {
+        backgroundBurstTask?.cancel()
+        backgroundBurstTask = nil
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+    }
+
+    private func updateBackgroundDiagnostics() async {
+        var lines: [String] = []
+        switch UIApplication.shared.backgroundRefreshStatus {
+        case .available: lines.append("Фоновое обновление: доступно")
+        case .denied: lines.append("Фоновое обновление: запрещено")
+        case .restricted: lines.append("Фоновое обновление: ограничено")
+        @unknown default: lines.append("Фоновое обновление: неизвестно")
+        }
+
+        if engine.runsInBackground {
+#if TGWS_TUNNEL_AVAILABLE
+            let connected = await TunnelController.shared.isConnected()
+            lines.append(connected ? "VPN: подключён" : "VPN: отключён")
+#else
+            lines.append("VPN: недоступен в этой сборке")
+#endif
+        } else {
+            switch BackgroundKeeper.shared.authorizationStatus {
+            case .authorizedAlways: lines.append("Геопозиция: всегда")
+            case .authorizedWhenInUse: lines.append("Геопозиция: при использовании")
+            case .denied, .restricted: lines.append("Геопозиция: запрещена")
+            case .notDetermined: lines.append("Геопозиция: не запрошена")
+            @unknown default: lines.append("Геопозиция: неизвестно")
+            }
+            lines.append(
+                BackgroundKeeper.shared.isActive
+                    ? "Удержание фона: включено"
+                    : "Удержание фона: выключено"
+            )
+        }
+        backgroundDiagnostics = lines.joined(separator: "\n")
+    }
+
+    private func didStart(announce: Bool = true) {
+        state = .running
+        if !engine.runsInBackground {
+            BackgroundKeeper.shared.activate()
+        }
+        if ProxyHealthSettings.isEnabled {
+            BackgroundHealthTasks.scheduleNext()
+        } else {
+            BackgroundHealthTasks.cancel()
+        }
+        lastSample = nil
+        traffic = []
+        if announce {
+            Haptics.notify(.success)
+            NotificationManager.post(title: "TG WS Proxy", body: "Прокси запущен")
+        }
+
+        statsTask?.cancel()
+        let checkEvery = max(5, Int(ProxyHealthSettings.checkInterval))
+        statsTask = Task { [weak self] in
+            var tick = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                let s = await self.engine.stats()
+                self.stats = s
+                self.recordTraffic(s)
+
+                tick += 1
+                if tick % checkEvery == 0,
+                   ProxyHealthSettings.isEnabled,
+                   self.isRunning {
+                    await self.forceHealthCheck(reason: "timer")
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func recordTraffic(_ s: ProxyStats) {
+        let now = Date()
+        if let last = lastSample {
+            let dt = max(now.timeIntervalSince(last.at), 0.001)
+            let up = max((s.uploadedBytes - last.up) / dt, 0)
+            let down = max((s.downloadedBytes - last.down) / dt, 0)
+            traffic.append(TrafficSample(time: now, up: up, down: down))
+            if traffic.count > Self.trafficWindow {
+                traffic.removeFirst(traffic.count - Self.trafficWindow)
+            }
+        }
+        lastSample = (s.uploadedBytes, s.downloadedBytes, now)
+    }
+
+    private func didFail(_ message: String) {
+        state = .failed(message)
+        healthIsOK = false
+        healthMessage = message
+        BackgroundKeeper.shared.deactivate()
+        Haptics.notify(.error)
+        NotificationManager.post(title: "TG WS Proxy", body: "Ошибка: \(message)")
+    }
+
+    private func persistConfiguration() {
+        guard let data = try? JSONEncoder().encode(configuration) else { return }
+        UserDefaults.standard.set(data, forKey: Self.settingsKey)
     }
 
     func telegramURL() -> URL? {
@@ -196,87 +510,6 @@ final class ProxyViewModel: ObservableObject {
         let refreshed = await NativeProxy.refreshCloudflareDomains()
         reloadCloudflareDomains()
         return refreshed
-    }
-
-    private func didStart() {
-        state = .running
-        if !engine.runsInBackground {
-            BackgroundKeeper.shared.activate()
-        }
-        lastSample = nil
-        traffic = []
-        Haptics.notify(.success)
-        NotificationManager.post(title: "TG WS Proxy", body: "Прокси запущен")
-        statsTask?.cancel()
-        statsTask = Task { [weak self] in
-            var tick = 0
-            while !Task.isCancelled {
-                guard let self else { return }
-                let s = await self.engine.stats()
-                self.stats = s
-                self.recordTraffic(s)
-
-                tick += 1
-                if tick % 5 == 0, self.isRunning, !(await self.isListening()) {
-                    self.didFail("Прокси перестал отвечать".tgLoc)
-                    return
-                }
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
-    }
-
-    private func isListening() async -> Bool {
-        let host = configuration.bindAddress
-        guard let port = NWEndpoint.Port(rawValue: UInt16(configuration.port)) else { return false }
-        return await withCheckedContinuation { continuation in
-            let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
-            let finished = OSAllocatedUnfairLock(initialState: false)
-            func finish(_ alive: Bool) {
-                let first = finished.withLock { done -> Bool in
-                    guard !done else { return false }
-                    done = true
-                    return true
-                }
-                guard first else { return }
-                connection.cancel()
-                continuation.resume(returning: alive)
-            }
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready: finish(true)
-                case .failed, .cancelled: finish(false)
-                default: break
-                }
-            }
-            connection.start(queue: .global())
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { finish(false) }
-        }
-    }
-
-    private func recordTraffic(_ s: ProxyStats) {
-        let now = Date()
-        if let last = lastSample {
-            let dt = max(now.timeIntervalSince(last.at), 0.001)
-            let up = max((s.uploadedBytes - last.up) / dt, 0)
-            let down = max((s.downloadedBytes - last.down) / dt, 0)
-            traffic.append(TrafficSample(time: now, up: up, down: down))
-            if traffic.count > Self.trafficWindow {
-                traffic.removeFirst(traffic.count - Self.trafficWindow)
-            }
-        }
-        lastSample = (s.uploadedBytes, s.downloadedBytes, now)
-    }
-
-    private func didFail(_ message: String) {
-        state = .failed(message)
-        Haptics.notify(.error)
-        NotificationManager.post(title: "TG WS Proxy", body: "Ошибка: \(message)")
-    }
-
-    private func persistConfiguration() {
-        guard let data = try? JSONEncoder().encode(configuration) else { return }
-        UserDefaults.standard.set(data, forKey: Self.settingsKey)
     }
 }
 

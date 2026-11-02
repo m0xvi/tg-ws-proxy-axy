@@ -1,3 +1,4 @@
+import BackgroundTasks
 import SwiftUI
 
 @main
@@ -20,6 +21,12 @@ struct TgWsProxyApp: App {
                         .environmentObject(settings)
                         .environment(\.liquidGlassEnabled, settings.liquidGlass)
                 }
+        }
+        // Легальный фоновый «пинок» от iOS: даже если приложение выгружено,
+        // система иногда даёт ~30 секунд на принудительную проверку.
+        .backgroundTask(.appRefresh(BackgroundHealthTasks.identifier)) { [proxy] in
+            await proxy.forceHealthCheck(reason: "bg-refresh")
+            BackgroundHealthTasks.scheduleNext()
         }
     }
 }

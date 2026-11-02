@@ -15,14 +15,19 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.9</string>
+    <string>2.0.10</string>
     <key>CFBundleVersion</key>
-    <string>209</string>
+    <string>210</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>UIBackgroundModes</key>
     <array>
         <string>location</string>
+        <string>fetch</string>
+    </array>
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>com.m0xvi.kiixy.healthcheck</string>
     </array>
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>Геопозиция нужна только для того, чтобы iOS не приостанавливала прокси в фоне. Координаты никуда не передаются.</string>

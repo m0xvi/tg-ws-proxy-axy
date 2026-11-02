@@ -27,6 +27,7 @@ enum AppTab: CaseIterable {
 struct ContentView: View {
     @EnvironmentObject private var proxy: ProxyViewModel
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.scenePhase) private var scenePhase
     @State private var tab: AppTab = {
         switch ProcessInfo.processInfo.environment["TGWS_TAB"] {
         case "settings": return .settings
@@ -66,12 +67,13 @@ struct ContentView: View {
                 .padding(.bottom, 24)
         }
         .tint(.tgAccent)
-        .task {
+        .task { @MainActor in
             LogStore.shared.startCapturing()
             let envStart = ProcessInfo.processInfo.environment["TGWS_AUTOSTART"] == "1"
-            if (envStart || settings.autoStart), !proxy.isRunning {
-                proxy.start()
-            }
+            await proxy.resumeIfNeeded(autoStartRequested: envStart || settings.autoStart)
+        }
+        .onChange(of: scenePhase) { phase in
+            proxy.handleScenePhase(phase)
         }
     }
 
@@ -180,6 +182,7 @@ private struct HomeView: View {
                     backgroundWarning(warning)
                 }
                 statusCard
+                HealthStatusCard()
                 if proxy.isRunning {
                     TrafficChartCard(samples: proxy.traffic)
                 }
@@ -280,6 +283,71 @@ private struct HomeView: View {
             .card(padding: 12)
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct HealthStatusCard: View {
+    @EnvironmentObject private var proxy: ProxyViewModel
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Контроль фона".tgLoc, systemImage: "stethoscope")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Circle()
+                    .fill(proxy.healthIsOK ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+            }
+
+            Text(proxy.healthMessage)
+                .font(.footnote)
+                .foregroundStyle(proxy.healthIsOK ? Color.secondary : Color.orange)
+
+            if let date = proxy.lastHealthCheck {
+                Text("Последняя проверка".tgLoc + ": " + date.formatted(date: .omitted, time: .standard))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !proxy.backgroundDiagnostics.isEmpty {
+                Text(proxy.backgroundDiagnostics)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button {
+                    Task { await proxy.forceHealthCheck(reason: "manual") }
+                } label: {
+                    Label("Проверить и восстановить".tgLoc, systemImage: "arrow.clockwise")
+                        .font(.footnote)
+                }
+                .buttonStyle(.bordered)
+
+                Spacer(minLength: 8)
+
+                Button {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        openURL(url)
+                    }
+                } label: {
+                    Label("Настройки iOS".tgLoc, systemImage: "gear")
+                        .font(.footnote)
+                }
+                .buttonStyle(.borderless)
+            }
+
+            if proxy.recoveryCount > 0 {
+                Text("Восстановлений".tgLoc + ": \(proxy.recoveryCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(padding: 14)
     }
 }
 
