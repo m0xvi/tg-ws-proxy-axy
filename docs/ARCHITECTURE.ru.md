@@ -256,6 +256,7 @@ LiveContainer запускает приложение внутри контей�
 - Туннельный режим требует entitlement `com.apple.developer.networking.networkextension` и подходящего provisioning profile.
 - На бесплатном Apple ID Network Extension и App Groups могут не подписаться.
 - Cloudflare Workers могут временно блокировать запросы (HTTP 429); приложение отслеживает cooldown.
+- `IsProxyRunning()` и TCP-проба `ProxyService` проверяют только локальный слушатель. Если в логах `акт:0` при неизменном `cf:...`, ядро живо, а рвётся **upstream** (DNS / маршрут Cloudflare / порт 80). Такой сбой watchdog перезапуском не лечится — за него отвечает логика маршрутов в `src/cfproxy.rs` и `src/proxy.rs` (sticky DNS, штраф `:80`, анти-шторм и сквозной TCP fallback на `443`). Подробности — в пункте 8 раздела «Устойчивая работа в мобильных сетях» [README.md](../README.md).
 - Прокси не маршрутизирует весь трафик устройства, только тот, что направлен в Telegram.
 
 ## Рекомендации по использованию
