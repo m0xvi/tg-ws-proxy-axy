@@ -20,6 +20,9 @@ protocol ProxyEngine: AnyObject {
     func start(_ configuration: ProxyConfiguration) async -> Int32
     func stop() async
     func stats() async -> ProxyStats
+    /// Принудительная проверка живости. Не должна опираться только на UI-состояние:
+    /// в туннельном режиме ядро живёт в другом процессе.
+    func health(_ configuration: ProxyConfiguration) async -> Bool
 }
 
 final class LoopbackEngine: ProxyEngine {
@@ -53,6 +56,16 @@ final class LoopbackEngine: ProxyEngine {
         return ProxyStats(rawValue: raw)
     }
 
+    func health(_ configuration: ProxyConfiguration) async -> Bool {
+        // FFI-флаг говорит, что слушающая задача жива, TCP-коннект — что порт
+        // действительно отвечает. Проверяем оба условия.
+        guard NativeProxy.isRunning() else { return false }
+        return await PortProbe.isListening(
+            host: configuration.bindAddress,
+            port: configuration.port
+        )
+    }
+
     private func startNetworkMonitor() {
         stopNetworkMonitor()
         let monitor = NWPathMonitor()
@@ -61,6 +74,7 @@ final class LoopbackEngine: ProxyEngine {
             let sig = path.availableInterfaces.map { "\($0.type):\($0.name)" }.joined(separator: ",")
             if let prev = self.lastInterfaceSignature, !prev.isEmpty, prev != sig {
                 NativeProxy.notifyNetworkChanged()
+                NotificationCenter.default.post(name: .tgwsForceHealthCheck, object: nil)
             }
             self.lastInterfaceSignature = sig
         }

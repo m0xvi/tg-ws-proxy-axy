@@ -45,6 +45,32 @@ fn runtime() -> &'static Runtime {
     })
 }
 
+/// Слушающая задача могла завершиться (ошибка accept, отмена, kill сокета iOS).
+/// При этом `STATE` остаётся `Some(...)`, и `StartProxy()` вечно отвечает `-1`.
+/// Убираем такое «мёртвое» состояние: watchdog на стороне приложения и
+/// расширения сможет честно увидеть 0 и перезапустить ядро.
+/// Возвращает `true`, если состояние было очищено.
+fn reap_finished_state(state: &mut Option<ProxyState>) -> bool {
+    let finished = state
+        .as_ref()
+        .map_or(false, |proxy| proxy.handle.is_finished());
+    if !finished {
+        return false;
+    }
+
+    if let Some(proxy) = state.take() {
+        linfo!("Proxy listener task finished unexpectedly; clearing stale state");
+        proxy.cancel_tasks.cancel();
+        let pools = proxy.pools.clone();
+        runtime().spawn(async move {
+            pools.close_all().await;
+            pools.reset().await;
+        });
+        STATS.reset();
+    }
+    true
+}
+
 fn cstr_to_string(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
@@ -69,7 +95,9 @@ pub unsafe extern "C" fn StartProxy(
     let cell = state_cell();
     let mut guard = cell.lock();
 
-    if guard.is_some() {
+    // `-1` только если слушатель реально жив. Мёртвый хвост от упавшей
+    // задачи убираем, иначе восстановление после kill сокета невозможно.
+    if guard.is_some() && !reap_finished_state(&mut *guard) {
         return -1;
     }
 
@@ -179,6 +207,21 @@ pub extern "C" fn StopProxy() -> c_int {
 
     linfo!("StopProxy: exit");
     0
+}
+
+/// Принудительная проверка живости для watchdog приложения / Network Extension.
+/// Возвращает 1, только если `TCP listener` ещё работает; 0 означает, что
+/// ядро надо перезапустить. Заодно убирает устаревшее состояние.
+#[unsafe(no_mangle)]
+pub extern "C" fn IsProxyRunning() -> c_int {
+    let mut guard = state_cell().lock();
+    if guard.is_none() {
+        return 0;
+    }
+    if reap_finished_state(&mut *guard) {
+        return 0;
+    }
+    1
 }
 
 #[unsafe(no_mangle)]

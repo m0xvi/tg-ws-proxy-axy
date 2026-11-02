@@ -171,6 +171,17 @@ struct SettingsView: View {
             Section("Поведение".tgLoc) {
                 Toggle("Авто-старт при запуске".tgLoc, isOn: $settings.autoStart)
                 Toggle("Авто-переподключение".tgLoc, isOn: $settings.reconnect)
+                Toggle("Принудительные проверки фона".tgLoc, isOn: $settings.forceHealthChecks)
+                Picker("Интервал проверки".tgLoc, selection: $settings.healthCheckInterval) {
+                    Text("5 с".tgLoc).tag(5)
+                    Text("10 с".tgLoc).tag(10)
+                    Text("30 с".tgLoc).tag(30)
+                }
+                .pickerStyle(.segmented)
+                .disabled(!settings.forceHealthChecks)
+                Text("iOS сама решает, когда дать приложению фоновое время. Для круглосуточной работы нужна VPN-сборка, а в локальном режиме — геопозиция «Всегда».".tgLoc)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Toggle("Уведомления".tgLoc, isOn: $settings.notifications)
                 Toggle("Вибрация".tgLoc, isOn: $settings.haptics)
             }

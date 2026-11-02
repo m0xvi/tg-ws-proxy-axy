@@ -135,6 +135,12 @@ final class AppSettings: ObservableObject {
     @Published var accent: AccentChoice { didSet { Self.save(accent.rawValue, Self.accentKey) } }
     @Published var autoStart: Bool { didSet { Self.save(autoStart, "app.autoStart") } }
     @Published var reconnect: Bool { didSet { Self.save(reconnect, "app.reconnect") } }
+    @Published var forceHealthChecks: Bool {
+        didSet { Self.save(forceHealthChecks, ProxyHealthSettings.enabledKey) }
+    }
+    @Published var healthCheckInterval: Int {
+        didSet { Self.save(healthCheckInterval, ProxyHealthSettings.intervalKey) }
+    }
     @Published var notifications: Bool { didSet { Self.save(notifications, "app.notifications") } }
     @Published var haptics: Bool { didSet { Self.save(haptics, "app.haptics") } }
     @Published var liquidGlass: Bool { didSet { Self.save(liquidGlass, "app.liquidGlass") } }
@@ -149,6 +155,11 @@ final class AppSettings: ObservableObject {
         accent = AccentChoice(rawValue: d.string(forKey: Self.accentKey) ?? "") ?? .pink
         autoStart = d.object(forKey: "app.autoStart") as? Bool ?? false
         reconnect = d.object(forKey: "app.reconnect") as? Bool ?? true
+        forceHealthChecks = d.object(forKey: ProxyHealthSettings.enabledKey) as? Bool ?? true
+        healthCheckInterval = min(
+            max(d.object(forKey: ProxyHealthSettings.intervalKey) as? Int ?? 10, 5),
+            60
+        )
         notifications = d.object(forKey: "app.notifications") as? Bool ?? false
         haptics = d.object(forKey: "app.haptics") as? Bool ?? true
         liquidGlass = d.object(forKey: "app.liquidGlass") as? Bool ?? true

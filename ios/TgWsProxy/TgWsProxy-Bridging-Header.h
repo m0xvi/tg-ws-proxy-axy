@@ -11,6 +11,7 @@ int32_t StartProxy(
     int32_t verbose
 );
 int32_t StopProxy(void);
+int32_t IsProxyRunning(void);
 void SetPoolSize(int32_t size);
 void SetBufferSizeKb(int32_t kb);
 void SetCfProxyCacheDir(const char *cache_dir);
