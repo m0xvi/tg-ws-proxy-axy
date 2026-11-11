@@ -81,7 +81,7 @@ struct InfoView: View {
 
             if let update = updates.visibleUpdate {
                 Button {
-                    if let url = update.ipaURL ?? update.htmlURL { openURL(url) }
+                    openURL(update.ipaURL ?? update.htmlURL)
                 } label: {
                     Label("Скачать новую версию".tgLoc, systemImage: "arrow.down.circle")
                         .font(.footnote)

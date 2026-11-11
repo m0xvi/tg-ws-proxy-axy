@@ -317,7 +317,7 @@ private struct HomeView: View {
 
             HStack(spacing: 8) {
                 Button {
-                    if let url = update.ipaURL ?? update.htmlURL { openURL(url) }
+                    openURL(update.ipaURL ?? update.htmlURL)
                 } label: {
                     Label("Скачать новую версию".tgLoc, systemImage: "arrow.down.circle")
                         .frame(maxWidth: .infinity)
