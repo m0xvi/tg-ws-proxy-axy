@@ -11,6 +11,7 @@ struct InfoView: View {
         ScrollView {
             VStack(spacing: 16) {
                 about
+                updateCheck
                 links
                 Text("GPLv3 (ядро) · MIT (оригинал)".tgLoc)
                     .font(.caption2)
@@ -38,6 +39,77 @@ struct InfoView: View {
         }
         .frame(maxWidth: .infinity)
         .card(padding: 20)
+    }
+
+    @ObservedObject private var updates = UpdateChecker.shared
+    @Environment(\.openURL) private var openURL
+
+    private var updateCheck: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Обновления".tgLoc, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if let date = updates.lastCheckedAt {
+                    Text(date.formatted(date: .omitted, time: .standard))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text(updateStatusText)
+                .font(.footnote)
+                .foregroundStyle(updateStatusColor)
+
+            HStack {
+                Button {
+                    Task { await updates.check(force: true) }
+                } label: {
+                    Label("Проверить обновления".tgLoc, systemImage: "arrow.clockwise")
+                        .font(.footnote)
+                }
+                .buttonStyle(.bordered)
+                .disabled(updates.status == .checking)
+
+                Spacer(minLength: 8)
+
+                Link(destination: UpdateChecker.releasesPageURL) {
+                    Label("Все релизы".tgLoc, systemImage: "arrow.up.right")
+                        .font(.footnote)
+                }
+            }
+
+            if let update = updates.visibleUpdate {
+                Button {
+                    if let url = update.ipaURL ?? update.htmlURL { openURL(url) }
+                } label: {
+                    Label("Скачать новую версию".tgLoc, systemImage: "arrow.down.circle")
+                        .font(.footnote)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(padding: 14)
+    }
+
+    private var updateStatusText: String {
+        switch updates.status {
+        case .idle: "—".tgLoc
+        case .checking: "Проверка…".tgLoc
+        case .upToDate: "Установлена последняя версия".tgLoc
+        case .available(let release): "Доступна версия".tgLoc + " " + release.version
+        case .failed: "Проверка не удалась, попробуйте позже".tgLoc
+        }
+    }
+
+    private var updateStatusColor: Color {
+        switch updates.status {
+        case .available: .tgAccent
+        case .failed: .orange
+        default: .secondary
+        }
     }
 
     private var links: some View {
