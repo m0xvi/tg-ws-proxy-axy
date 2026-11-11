@@ -44,7 +44,7 @@ Supports **iOS 16.0 – 27.0**.
 
 ### 1. Download the file
 
-From the [releases page](https://github.com/reekeer/tg-ws-proxy-ios/releases/latest), which also carries a full comparison:
+From the [releases page](https://github.com/m0xvi/tg-ws-proxy-axy/releases/latest), which also carries a full comparison:
 
 | File | Who it is for |
 |------|---------------|
@@ -97,8 +97,8 @@ The signature never expires, which makes this the only method where the app does
 <summary><b>Xcode</b> — build and install it yourself, needs a Mac</summary>
 
 ```sh
-git clone --recurse-submodules https://github.com/reekeer/tg-ws-proxy-ios
-cd tg-ws-proxy-ios
+git clone --recurse-submodules https://github.com/m0xvi/tg-ws-proxy-axy
+cd tg-ws-proxy-axy
 rustup target add aarch64-apple-ios
 open TgWsProxy.xcodeproj
 ```
@@ -121,6 +121,29 @@ If the app was not installed through Xcode, iOS first asks you to trust the cert
 ### 4. Connect Telegram
 
 Open the app, press the power button and then **"Open in Telegram"** — the proxy is added for you. All that is left is to confirm the connection in Telegram.
+
+---
+
+## ♾️ Permanent install and updates without a cable
+
+The 7-day limit is an Apple policy for **free** Apple IDs, not a quirk of the app: a free signature lasts exactly one week and cannot be made permanent on a free account. What you *can* do is make sure you never notice it:
+
+| Method | Signature lives | What you need |
+|--------|-----------------|---------------|
+| Sideloadly *Automatic App Refresh* | 7 days, **re-signed over Wi-Fi automatically** | a PC with Sideloadly on the same network |
+| AltStore / SideStore refresh | 7 days, **refreshed over Wi-Fi automatically** | AltServer on a PC (SideStore — no PC) |
+| TrollStore | **forever**, no re-signing at all | a vulnerable iOS version (up to 16.6.1) |
+| Paid Apple Developer ($99/year) | **1 year** per signature | Apple Developer Program |
+
+**Sideloadly auto refresh** — the easiest upgrade of the cable workflow:
+
+1. On the iPhone, enable **Sync over Wi-Fi** (iTunes/Finder → your device).
+2. Keep Sideloadly running on the PC with *Automatic App Refresh* on (it is on by default) — its background daemon re-signs the app over Wi-Fi before the 7-day deadline, so the app stays installed and working all the time.
+3. After the first USB pairing, Sideloadly also **installs apps over Wi-Fi** — future installs and updates no longer need a cable.
+
+**Updates without a cable, any method.** The app checks the latest GitHub Release on launch and on foreground return (at most once an hour) and shows a "New version" card on the home screen with a direct link to the matching `.ipa` (free or vpn, depending on your build). Open the link, download the file, and install it the normal way: Wi-Fi in Sideloadly, **Refresh** in AltStore (add the Release URL as a [custom repository](https://altstore.io) once and every future update is a single tap), or one tap in TrollStore.
+
+**TrollStore** is the only method where the app is truly permanent and no computer is involved at all — check your iOS version against the [compatibility list](https://ios.cfw.guide/installing-trollstore/).
 
 ---
 

@@ -70,10 +70,17 @@ struct ContentView: View {
         .task { @MainActor in
             LogStore.shared.startCapturing()
             let envStart = ProcessInfo.processInfo.environment["TGWS_AUTOSTART"] == "1"
+            // Проверка обновлений не блокирует запуск прокси.
+            Task { await UpdateChecker.shared.check() }
             await proxy.resumeIfNeeded(autoStartRequested: envStart || settings.autoStart)
         }
         .onChange(of: scenePhase) { phase in
             proxy.handleScenePhase(phase)
+            if phase == .active {
+                // Повторная проверка при возврате в foreground;
+                // внутри троттлинг не чаще раза в час.
+                Task { await UpdateChecker.shared.check() }
+            }
         }
     }
 
@@ -173,11 +180,15 @@ private struct FloatingNavMenu: View {
 private struct HomeView: View {
     @EnvironmentObject private var proxy: ProxyViewModel
     @Environment(\.openURL) private var openURL
+    @ObservedObject private var updates = UpdateChecker.shared
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
                 hero
+                if let update = updates.visibleUpdate {
+                    updateCard(update)
+                }
                 if let warning = proxy.backgroundWarning {
                     backgroundWarning(warning)
                 }
@@ -283,6 +294,44 @@ private struct HomeView: View {
             .card(padding: 12)
         }
         .buttonStyle(.plain)
+    }
+
+    private func updateCard(_ update: UpdateChecker.Release) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color.tgAccent)
+                Text("Доступна новая версия".tgLoc)
+                    .font(.subheadline.weight(.semibold))
+                Spacer(minLength: 8)
+                Text(update.version)
+                    .font(.callout.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(Color.tgAccent)
+            }
+
+            Text("Скачайте новый .ipa и установите его через Sideloadly, AltStore или TrollStore — без кабеля".tgLoc)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button {
+                    openURL(update.ipaURL ?? update.htmlURL)
+                } label: {
+                    Label("Скачать новую версию".tgLoc, systemImage: "arrow.down.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button("Позже".tgLoc) {
+                    updates.snoozeVisibleUpdate()
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .card(padding: 14)
     }
 }
 

@@ -54,12 +54,8 @@
         }
       }
     },
-    "127.0.0.1" : {
-
-    },
-    "1443" : {
-
-    },
+    "127.0.0.1" : {},
+    "1443" : {},
     "Cloudflare" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -115,9 +111,7 @@
         }
       }
     },
-    "t" : {
-
-    },
+    "t" : {},
     "Telegram → localhost → WSS → Telegram DC" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1226,6 +1220,116 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "iOS decides when to grant background time. For round-the-clock operation use the VPN build, or allow location \"Always\" in local mode."
+          }
+        }
+      }
+    },
+    "Доступна новая версия" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "New version available"
+          }
+        }
+      }
+    },
+    "Скачайте новый .ipa и установите его через Sideloadly, AltStore или TrollStore — без кабеля" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Download the new .ipa and install it with Sideloadly, AltStore or TrollStore — no cable needed"
+          }
+        }
+      }
+    },
+    "Скачать новую версию" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Download new version"
+          }
+        }
+      }
+    },
+    "Позже" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Later"
+          }
+        }
+      }
+    },
+    "Обновления" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Updates"
+          }
+        }
+      }
+    },
+    "Проверить обновления" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Check for updates"
+          }
+        }
+      }
+    },
+    "Проверка…" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking…"
+          }
+        }
+      }
+    },
+    "Установлена последняя версия" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You're up to date"
+          }
+        }
+      }
+    },
+    "Доступна версия" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Version available"
+          }
+        }
+      }
+    },
+    "Все релизы" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "All releases"
+          }
+        }
+      }
+    },
+    "Проверка не удалась, попробуйте позже" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Check failed, try again later"
           }
         }
       }

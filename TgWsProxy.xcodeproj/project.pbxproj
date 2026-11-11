@@ -22,6 +22,7 @@
 		100000000000000000000134 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000235 /* AppSettings.swift */; };
 		100000000000000000000135 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000236 /* OnboardingView.swift */; };
 		100000000000000000000137 /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000238 /* LogStore.swift */; };
+		100000000000000000000142 /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000242 /* UpdateChecker.swift */; };
 		100000000000000000000138 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000239 /* LogsView.swift */; };
 		100000000000000000000139 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000023A /* NotificationManager.swift */; };
 		10000000000000000000013D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000023E /* Localizable.xcstrings */; };
@@ -49,6 +50,7 @@
 		100000000000000000000235 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/AppSettings.swift; sourceTree = "<group>"; };
 		100000000000000000000236 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UI/OnboardingView.swift; sourceTree = "<group>"; };
 		100000000000000000000238 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logs/LogStore.swift; sourceTree = "<group>"; };
+		100000000000000000000242 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Updates/UpdateChecker.swift; sourceTree = "<group>"; };
 		100000000000000000000239 /* LogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logs/LogsView.swift; sourceTree = "<group>"; };
 		10000000000000000000023A /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Proxy/NotificationManager.swift; sourceTree = "<group>"; };
 		10000000000000000000023E /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
@@ -120,6 +122,7 @@
 				100000000000000000000235 /* AppSettings.swift */,
 				100000000000000000000236 /* OnboardingView.swift */,
 				100000000000000000000238 /* LogStore.swift */,
+				100000000000000000000242 /* UpdateChecker.swift */,
 				100000000000000000000239 /* LogsView.swift */,
 				10000000000000000000023A /* NotificationManager.swift */,
 				10000000000000000000023E /* Localizable.xcstrings */,
@@ -348,6 +351,7 @@
 				100000000000000000000134 /* AppSettings.swift in Sources */,
 				100000000000000000000135 /* OnboardingView.swift in Sources */,
 				100000000000000000000137 /* LogStore.swift in Sources */,
+				100000000000000000000142 /* UpdateChecker.swift in Sources */,
 				100000000000000000000138 /* LogsView.swift in Sources */,
 				100000000000000000000139 /* NotificationManager.swift in Sources */,
 				10000000000000000000013F /* BackgroundKeeper.swift in Sources */,
