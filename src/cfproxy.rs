@@ -1,5 +1,5 @@
 use crate::config::*;
-use crate::ws::{is_http_status_error, ws_connect_once, ws_connect_once_port, RawWebSocket, WsError};
+use crate::ws::{is_http_status_error, ws_connect_once_port, RawWebSocket, WsError};
 use crate::{ldebug, lerror, linfo, lwarn};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -26,13 +26,91 @@ static CF_BAD_ROUTES: Lazy<parking_lot::RwLock<std::collections::HashMap<(String
 static PORT80_SHORT_DROPS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Штраф на весь порт 80 хранится ОТДЕЛЬНО от CF_BAD_ROUTES.
+/// Раньше `CF_BAD_ROUTES.write().clear()` (в т.ч. из notify_network_changed
+/// и из ветки "все кандидаты плохие") мгновенно отменял "приоритет TLS 443
+/// на 5 мин", и ядро снова уходило на режущийся оператором :80.
+static PORT80_PENALTY_UNTIL: Lazy<parking_lot::RwLock<Option<Instant>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
+
+/// Анти-шторм: если за короткое окно свалилось много CF-попыток,
+/// на несколько секунд прекращаем долбить все 20 доменов и даём уйти
+/// в прямой TCP/SNI fallback вместо сотен `CF fail ...` в секунду.
+static CF_FAILURE_WINDOW: Lazy<parking_lot::RwLock<(Instant, usize)>> =
+    Lazy::new(|| parking_lot::RwLock::new((Instant::now(), 0)));
+static CF_COOLDOWN_UNTIL: Lazy<parking_lot::RwLock<Option<Instant>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
+static CF_LOG_THROTTLE: Lazy<parking_lot::RwLock<std::collections::HashMap<String, Instant>>> =
+    Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+const PORT80_PENALTY: Duration = Duration::from_secs(300);
+const CF_STORM_THRESHOLD: usize = 12;
+const CF_STORM_WINDOW: Duration = Duration::from_secs(3);
+const CF_STORM_COOLDOWN: Duration = Duration::from_secs(8);
+const CF_LOG_INTERVAL: Duration = Duration::from_secs(2);
+
+pub fn port80_penalty_active() -> bool {
+    match *PORT80_PENALTY_UNTIL.read() {
+        Some(until) => Instant::now() < until,
+        None => false,
+    }
+}
+
+pub fn cf_network_cooldown_active() -> bool {
+    match *CF_COOLDOWN_UNTIL.read() {
+        Some(until) => Instant::now() < until,
+        None => false,
+    }
+}
+
+pub fn note_cf_attempt_success() {
+    *CF_FAILURE_WINDOW.write() = (Instant::now(), 0);
+    *CF_COOLDOWN_UNTIL.write() = None;
+}
+
+pub fn note_cf_attempt_failure() {
+    let now = Instant::now();
+    let mut window = CF_FAILURE_WINDOW.write();
+    if now.saturating_duration_since(window.0) > CF_STORM_WINDOW {
+        window.0 = now;
+        window.1 = 0;
+    }
+    window.1 += 1;
+    if window.1 >= CF_STORM_THRESHOLD {
+        *CF_COOLDOWN_UNTIL.write() = Some(now + CF_STORM_COOLDOWN);
+        lwarn!(
+            " CF шторм отказов: пауза {:.0}с, уходим в прямой fallback",
+            CF_STORM_COOLDOWN.as_secs_f64()
+        );
+    }
+}
+
+/// Не пишем сотни одинаковых `CF fail <domain>: timeout` подряд.
+pub fn should_log_cf_error(msg: &str) -> bool {
+    let now = Instant::now();
+    let mut throttled = CF_LOG_THROTTLE.write();
+    if let Some(&last) = throttled.get(msg) {
+        if now.saturating_duration_since(last) < CF_LOG_INTERVAL {
+            return false;
+        }
+    }
+    throttled.insert(msg.to_string(), now);
+    if throttled.len() > 256 {
+        throttled.retain(|_, t| now.saturating_duration_since(*t) < Duration::from_secs(8));
+    }
+    true
+}
+
+/// Смена сети НЕ отменяет ни штраф порта 80, ни счётчик сбросов после 101.
 pub fn clear_cf_fast_route() {
     *CF_FAST_ROUTE.write() = None;
     CF_BAD_ROUTES.write().clear();
-    PORT80_SHORT_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn is_cf_route_bad(dial_addr: &str, port: u16) -> bool {
+    if port == 80 && port80_penalty_active() {
+        return true;
+    }
     let now = Instant::now();
     let guard = CF_BAD_ROUTES.read();
     if let Some(&until) = guard.get(&(dial_addr.to_string(), port)) {
@@ -63,14 +141,21 @@ pub fn mark_cf_route_unstable(dial_addr: &str, port: u16) {
         }
     }
     let now = Instant::now();
-    let mut bad = CF_BAD_ROUTES.write();
-    bad.insert((dial_addr.to_string(), port), now + Duration::from_secs(180));
-    if port == 80 {
-        let drops = PORT80_SHORT_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if drops >= 2 {
-            lwarn!(" CF port 80 сбрасывается оператором после 101 -> приоритет TLS 443 на 5 мин");
-            bad.insert(("*".to_string(), 80), now + Duration::from_secs(300));
+    let mut penalize_port80 = false;
+    {
+        let mut bad = CF_BAD_ROUTES.write();
+        bad.insert((dial_addr.to_string(), port), now + Duration::from_secs(180));
+        if port == 80 {
+            let drops = PORT80_SHORT_DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if drops >= 2 {
+                bad.insert(("*".to_string(), 80), now + PORT80_PENALTY);
+                penalize_port80 = true;
+            }
         }
+    }
+    if penalize_port80 {
+        *PORT80_PENALTY_UNTIL.write() = Some(now + PORT80_PENALTY);
+        lwarn!(" CF port 80 сбрасывается оператором после 101 -> приоритет TLS 443 на 5 мин");
     }
 }
 
@@ -553,8 +638,49 @@ struct DohResponse {
 static DOH_CACHE: Lazy<parking_lot::RwLock<std::collections::HashMap<String, (String, Instant)>>> =
     Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
 
+/// Последний успешно разрешённый IP. НЕ очищается при смене сети: сразу после
+/// Wi-Fi ↔ LTE системный резолвер часто отдаёт "nodename nor servname provided",
+/// и полная очистка кеша превращала это в лавину отказов по всем 20 доменам.
+static DOH_STICKY: Lazy<parking_lot::RwLock<std::collections::HashMap<String, String>>> =
+    Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+static DOH_LAST_FAILURE: Lazy<parking_lot::RwLock<std::collections::HashMap<String, Instant>>> =
+    Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+static NETWORK_CHANGED_AT: Lazy<parking_lot::RwLock<Option<Instant>>> =
+    Lazy::new(|| parking_lot::RwLock::new(None));
+
+const NETWORK_GRACE: Duration = Duration::from_secs(3);
+const DOH_FAILURE_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Раньше здесь был `DOH_CACHE.write().clear()`. Теперь только помечаем
+/// короткий grace-период, чтобы не долбить резолвер в момент переключения.
 pub fn clear_doh_cache() {
+    *NETWORK_CHANGED_AT.write() = Some(Instant::now());
+}
+
+pub fn network_grace_active() -> bool {
+    match *NETWORK_CHANGED_AT.read() {
+        Some(at) => Instant::now().saturating_duration_since(at) < NETWORK_GRACE,
+        None => false,
+    }
+}
+
+pub fn doh_sticky_ip(domain: &str) -> Option<String> {
+    DOH_STICKY.read().get(domain).cloned()
+}
+
+/// Полный сброс вызывается только при явном Start/Stop прокси, не при смене сети.
+pub fn reset_network_state() {
+    *CF_FAST_ROUTE.write() = None;
+    CF_BAD_ROUTES.write().clear();
+    PORT80_SHORT_DROPS.store(0, std::sync::atomic::Ordering::Relaxed);
+    *PORT80_PENALTY_UNTIL.write() = None;
     DOH_CACHE.write().clear();
+    DOH_STICKY.write().clear();
+    DOH_LAST_FAILURE.write().clear();
+    *NETWORK_CHANGED_AT.write() = None;
+    *CF_FAILURE_WINDOW.write() = (Instant::now(), 0);
+    *CF_COOLDOWN_UNTIL.write() = None;
+    CF_LOG_THROTTLE.write().clear();
 }
 
 fn pick_preferred_ip(candidates: &[String]) -> String {
@@ -582,6 +708,19 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         }
     }
 
+    let sticky = doh_sticky_ip(domain);
+    let recently_failed = DOH_LAST_FAILURE
+        .read()
+        .get(domain)
+        .map(|at| Instant::now().saturating_duration_since(*at) < DOH_FAILURE_BACKOFF)
+        .unwrap_or(false);
+
+    // Во время переключения сети или сразу после DNS-отказа не дёргаем
+    // резолвер повторно: работаем по последнему известному IP.
+    if sticky.is_some() && (network_grace_active() || recently_failed) {
+        return sticky.clone();
+    }
+
     // Включаем Яндекс DoH (работает во всех мобильных сетях РФ и белых списках)
     // и прямое обращение к 8.8.8.8 по HTTPS без зависимости от системного DNS.
     let endpoints = [
@@ -592,10 +731,18 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
         "https://cloudflare-dns.com/dns-query",
     ];
 
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(1500))
         .build()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(_) => {
+            DOH_LAST_FAILURE
+                .write()
+                .insert(domain.to_string(), Instant::now());
+            return sticky;
+        }
+    };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(endpoints.len() + 1);
     let mut tasks = Vec::new();
@@ -686,6 +833,17 @@ pub async fn resolve_doh(domain: &str) -> Option<String> {
             domain.to_string(),
             (ip.clone(), Instant::now() + Duration::from_secs(300)),
         );
+        DOH_STICKY.write().insert(domain.to_string(), ip.clone());
+        DOH_LAST_FAILURE.write().remove(domain);
+    } else {
+        DOH_LAST_FAILURE
+            .write()
+            .insert(domain.to_string(), Instant::now());
+        // Ошибка резолвера != домен недоступен. Возвращаем sticky IP,
+        // чтобы `ws_connect_once_full` не превращал это в "no fallback".
+        if let Some(ip) = sticky {
+            return Some(ip);
+        }
     }
 
     final_ip
@@ -721,7 +879,10 @@ async fn race_cf_mobile_endpoints(
     // (dial_addr, is_clean_ip, port, secure)
     let mut candidates: Vec<(String, bool, u16, bool)> = Vec::with_capacity(8);
 
-    let prefer_plain = DISABLE_SECURE.load(std::sync::atomic::Ordering::Relaxed);
+    // Если оператор режет :80 после 101, принудительно уходим на TLS 443,
+    // даже если пользователь включил "Порт 80 для Cloudflare (No TLS)".
+    let prefer_plain = DISABLE_SECURE.load(std::sync::atomic::Ordering::Relaxed)
+        && !port80_penalty_active();
     let total_clean = CF_CLEAN_IPS.len();
     if total_clean >= 3 {
         let base_idx =
@@ -745,23 +906,39 @@ async fn race_cf_mobile_endpoints(
         }
     }
 
-    // Если все кандидаты были в штрафном списке — очищаем список и пробуем оба порта заново
+    // Если все кандидаты были в штрафном списке — снимаем штраф ТОЛЬКО с
+    // конкретных IP на 443. Раньше здесь был `CF_BAD_ROUTES.write().clear()`,
+    // который мгновенно отменял ("*", 80) и возвращал ядро на режущийся порт.
     if candidates.is_empty() && total_clean >= 2 {
-        CF_BAD_ROUTES.write().clear();
         let ip1 = CF_CLEAN_IPS[0].to_string();
         let ip2 = CF_CLEAN_IPS[1].to_string();
+        {
+            let mut bad = CF_BAD_ROUTES.write();
+            bad.remove(&(ip1.clone(), 443));
+            bad.remove(&(ip2.clone(), 443));
+            if !port80_penalty_active() {
+                bad.remove(&(ip1.clone(), 80));
+                bad.remove(&(ip2.clone(), 80));
+            }
+        }
         candidates.push((ip1.clone(), true, 443, true));
-        candidates.push((ip1, true, 80, false));
         candidates.push((ip2.clone(), true, 443, true));
-        candidates.push((ip2, true, 80, false));
+        if !port80_penalty_active() {
+            candidates.push((ip1, true, 80, false));
+            candidates.push((ip2, true, 80, false));
+        }
     }
 
-    // Также параллельно запускаем подключение по самому домену (на случай кастомного не-CF хоста)
-    let def_port = if prefer_plain && !is_cf_route_bad(domain, 80) { 80 } else { 443 };
-    candidates.push((domain.to_string(), false, def_port, def_port == 443));
+    // Доменный кандидат требует системного DNS. В grace-период после смены
+    // сети он почти всегда даёт "nodename nor servname provided" — не добавляем.
+    if !network_grace_active() {
+        let def_port = if prefer_plain && !is_cf_route_bad(domain, 80) { 80 } else { 443 };
+        candidates.push((domain.to_string(), false, def_port, def_port == 443));
+    }
 
     let race_timeout = attempt_timeout.clamp(Duration::from_millis(1500), Duration::from_millis(2500));
-    let (tx, mut rx) = tokio::sync::mpsc::channel(candidates.len());
+    // В grace-период доменный кандидат не добавляется: channel(0) паниковал бы.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(candidates.len().max(1));
     let mut tasks = Vec::with_capacity(candidates.len());
 
     for (idx, (dial_addr, is_clean, port, secure)) in candidates.into_iter().enumerate() {
@@ -840,11 +1017,28 @@ async fn race_cf_mobile_endpoints(
         t.abort();
     }
 
-    // Если чистые IP не подошли (например, пользовательский домен не на Cloudflare), пробуем DoH IP
+    // Если чистые IP не подошли (например, пользовательский домен не на Cloudflare), пробуем DoH IP.
+    // Явно задаём порт/TLS: ws_connect_once() использовал бы DISABLE_SECURE и увёл бы
+    // соединение на :80 даже во время действующего штрафа порта 80.
     if let Some(resolved_ip) = resolve_doh(domain).await {
         if !resolved_ip.is_empty() {
             let ip_timeout = attempt_timeout.min(Duration::from_millis(1800));
-            if let Ok(ws) = ws_connect_once(&resolved_ip, domain, path, ip_timeout).await {
+            let (ip_port, ip_secure) = if prefer_plain {
+                (80u16, false)
+            } else {
+                (443u16, true)
+            };
+            if let Ok(ws) = ws_connect_once_port(
+                &resolved_ip,
+                ip_port,
+                domain,
+                path,
+                ip_timeout,
+                None,
+                ip_secure,
+            )
+            .await
+            {
                 return (Some(ws), resolved_ip, None);
             }
         }
@@ -870,7 +1064,7 @@ pub async fn cf_connect_domain(
     let cached_route = {
         let guard = CF_FAST_ROUTE.read();
         guard.as_ref().and_then(|r| {
-            if Instant::now() < r.expires_at {
+            if Instant::now() < r.expires_at && !(r.port == 80 && port80_penalty_active()) {
                 Some(r.clone())
             } else {
                 None
@@ -915,6 +1109,9 @@ pub async fn cf_connect_domain(
 }
 
 pub fn log_cf_conn_error(msg: &str, err: &WsError) {
+    if !should_log_cf_error(msg) {
+        return;
+    }
     if let WsError::Io(e) = err {
         if e.kind() == std::io::ErrorKind::ConnectionReset {
             return;
@@ -952,5 +1149,53 @@ mod tests {
         assert!(is_worker_style_domain("tg-ws.user.workers.dev"));
         assert!(is_worker_style_domain("my-app.pages.dev"));
         assert!(!is_worker_style_domain("my-domain.ru"));
+    }
+
+    /// Один последовательный тест на всё разделяемое состояние: параллельные
+    /// тесты могли бы перезаписывать статики друг друга.
+    #[test]
+    fn test_network_state_survives_network_change() {
+        reset_network_state();
+
+        // Два сброса после 101 включают 5-минутный запрет порта 80.
+        mark_cf_route_unstable("188.114.98.3", 80);
+        assert!(!port80_penalty_active());
+        mark_cf_route_unstable("188.114.98.3", 80);
+        assert!(port80_penalty_active());
+        assert!(is_cf_route_bad("188.114.98.3", 80));
+        assert!(!is_cf_route_bad("188.114.98.3", 443));
+
+        // Смена сети больше не отменяет штраф и не выжигает sticky DNS.
+        clear_cf_fast_route();
+        clear_doh_cache();
+        assert!(port80_penalty_active());
+        assert!(network_grace_active());
+
+        DOH_STICKY
+            .write()
+            .insert("kws2.example.co.uk".to_string(), "188.114.98.3".to_string());
+        clear_doh_cache();
+        assert_eq!(
+            doh_sticky_ip("kws2.example.co.uk"),
+            Some("188.114.98.3".to_string())
+        );
+
+        // Шторм отказов включает паузу, первый же успех её снимает.
+        for _ in 0..CF_STORM_THRESHOLD {
+            note_cf_attempt_failure();
+        }
+        assert!(cf_network_cooldown_active());
+        note_cf_attempt_success();
+        assert!(!cf_network_cooldown_active());
+
+        // Одинаковые `CF fail ...` не должны заполнять логи сотнями строк.
+        assert!(should_log_cf_error(" CF fail kws2.example.co.uk: timeout"));
+        assert!(!should_log_cf_error(" CF fail kws2.example.co.uk: timeout"));
+
+        // Явный Start/Stop прокси сбрасывает состояние полностью.
+        reset_network_state();
+        assert!(!port80_penalty_active());
+        assert!(!network_grace_active());
+        assert!(doh_sticky_ip("kws2.example.co.uk").is_none());
     }
 }

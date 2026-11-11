@@ -59,6 +59,12 @@ enum NativeProxy {
         _ = StopProxy()
     }
 
+    /// Принудительная проверка: жив ли TCP-слушатель Rust-ядра.
+    /// Используется watchdog приложения и `PacketTunnelProvider`.
+    static func isRunning() -> Bool {
+        IsProxyRunning() == 1
+    }
+
     static func setDpiFragmentation(_ enabled: Bool) {
         SetDpiFragmentation(enabled ? 1 : 0)
     }

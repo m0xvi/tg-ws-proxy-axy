@@ -12,6 +12,7 @@ int32_t StartProxy(
     int32_t verbose
 );
 int32_t StopProxy(void);
+int32_t IsProxyRunning(void);
 void SetCfProxyConfig(int32_t enabled, int32_t priority, const char *user_domain);
 void SetDpiFragmentation(int32_t v);
 void NotifyNetworkChanged(void);
@@ -45,8 +46,10 @@ int main(void) {
         fprintf(stderr, "StartProxy returned %d\n", started);
     }
     assert(started == 0);
+    assert(IsProxyRunning() == 1);
 
     NotifyNetworkChanged();
+    assert(IsProxyRunning() == 1);
 
     char *stats = GetStats();
     assert(stats != NULL);
@@ -55,5 +58,6 @@ int main(void) {
     FreeString(stats);
 
     assert(StopProxy() == 0);
+    assert(IsProxyRunning() == 0);
     return EXIT_SUCCESS;
 }

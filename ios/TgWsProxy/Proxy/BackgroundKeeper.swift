@@ -5,6 +5,7 @@ final class BackgroundKeeper: NSObject, ObservableObject {
     static let shared = BackgroundKeeper()
 
     private let manager = CLLocationManager()
+    private var keepAliveTimer: Timer?
     private(set) var isActive = false
 
     @Published private(set) var authorizationStatus: CLAuthorizationStatus = .notDetermined
@@ -24,18 +25,35 @@ final class BackgroundKeeper: NSObject, ObservableObject {
     }
 
     func activate() {
-        guard !isActive else { return }
+        guard !isActive else {
+            refresh()
+            return
+        }
         isActive = true
         requestAuthorization()
         applyBackgroundMode()
         manager.startUpdatingLocation()
+        startKeepAliveTimer()
     }
 
     func deactivate() {
         guard isActive else { return }
         isActive = false
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
         manager.stopUpdatingLocation()
         manager.allowsBackgroundLocationUpdates = false
+    }
+
+    /// Принудительное обновление фонового режима: iOS может приостановить
+    /// location updates даже при `pausesLocationUpdatesAutomatically = false`.
+    /// Дёргаем из watchdog и по таймеру, чтобы не «отпустить» процесс.
+    func refresh() {
+        guard isActive else { return }
+        applyBackgroundMode()
+        if isAuthorizedForBackground {
+            manager.startUpdatingLocation()
+        }
     }
 
     private func requestAuthorization() {
@@ -52,6 +70,15 @@ final class BackgroundKeeper: NSObject, ObservableObject {
     private func applyBackgroundMode() {
         manager.allowsBackgroundLocationUpdates = isAuthorizedForBackground
     }
+
+    private func startKeepAliveTimer() {
+        keepAliveTimer?.invalidate()
+        let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+            self?.refresh()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        keepAliveTimer = timer
+    }
 }
 
 extension BackgroundKeeper: CLLocationManagerDelegate {
@@ -60,10 +87,18 @@ extension BackgroundKeeper: CLLocationManagerDelegate {
         guard isActive else { return }
         applyBackgroundMode()
         requestAuthorization()
+        refresh()
+        NotificationCenter.default.post(name: .tgwsForceHealthCheck, object: nil)
+    }
+
+    func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
+        fputs("BackgroundKeeper: location updates paused, restarting\n", stderr)
+        refresh()
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         if (error as? CLError)?.code == .locationUnknown { return }
         fputs("BackgroundKeeper: \(error.localizedDescription)\n", stderr)
+        NotificationCenter.default.post(name: .tgwsForceHealthCheck, object: nil)
     }
 }

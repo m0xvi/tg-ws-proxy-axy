@@ -167,6 +167,19 @@ jobs:
             release-assets/*.apk
             release-assets/*.ipa
           body: |
+            ## 🚀 KiiXY ${{ steps.tag.outputs.tag_name }}
+
+            **Изменения в этой версии**
+
+            - **Исправлены периодические отвалы на проблемном провайдере:** при включённом Cloudflare ядро теперь проходит всю цепочку дальше — прямой WS с SNI-fronting, затем TCP/FakeTLS к датацентрам Telegram на порту `443` — вместо `no fallback available` и обрыва соединения.
+            - **Штраф порта 80 живёт все 5 минут:** после сбросов `101 → 0B` запрет на `:80` не отменяется сменой сети, пересбором кандидатов и настройкой `DISABLE_SECURE`; все CF-подключения принудительно идут на TLS `443`.
+            - **Sticky DNS + backoff:** при отказе системного резолвера возвращается последний рабочий IP вместо лавины `failed to lookup address information`; повторы подавлены на 2 с, доменный кандидат исключён в 3-с grace после переключения сети, пулы пересоздаются с задержкой 1.5 с.
+            - **Анти-шторм:** 12 отказов за 3 с включают 8-с паузу CF-гонок с уходом в прямой fallback, одинаковые ошибки пишутся в лог не чаще раза в 2 с.
+            - **Фоновые проверки и авто-восстановление (особенно iOS):** `IsProxyRunning()`, watchdog Network Extension раз в 10 с, проверки приложения по таймеру / foreground / смене сети / VPN-статуса / `BGAppRefreshTask` и вручную; Android foreground-сервис проверяет TCP-порт.
+            - Поведение маршрутов покрыто unit-тестом `test_network_state_survives_network_change`; CI проверяет `cargo check`, `cargo test --release --lib` и C FFI smoke.
+
+            ---
+
             ## 📱 Скачать (Android & iOS)
 
             ### 🤖 Android (`.apk`)

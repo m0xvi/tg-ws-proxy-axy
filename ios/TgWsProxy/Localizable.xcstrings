@@ -1059,6 +1059,176 @@
           }
         }
       }
+    },
+    "Проверка ещё не выполнялась" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No health check yet"
+          }
+        }
+      }
+    },
+    "Прокси отвечает" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxy is responding"
+          }
+        }
+      }
+    },
+    "Прокси не отвечает, восстанавливаем…" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxy is not responding, recovering…"
+          }
+        }
+      }
+    },
+    "Восстанавливаем прокси…" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recovering proxy…"
+          }
+        }
+      }
+    },
+    "Прокси восстановлен" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxy recovered"
+          }
+        }
+      }
+    },
+    "Не удалось восстановить прокси" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Could not recover the proxy"
+          }
+        }
+      }
+    },
+    "Контроль фона" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Background watchdog"
+          }
+        }
+      }
+    },
+    "Проверить и восстановить" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Check and recover"
+          }
+        }
+      }
+    },
+    "Настройки iOS" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS Settings"
+          }
+        }
+      }
+    },
+    "Последняя проверка" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Last check"
+          }
+        }
+      }
+    },
+    "Восстановлений" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recoveries"
+          }
+        }
+      }
+    },
+    "Принудительные проверки фона" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Forced background checks"
+          }
+        }
+      }
+    },
+    "Интервал проверки" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Check interval"
+          }
+        }
+      }
+    },
+    "5 с" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "5 s"
+          }
+        }
+      }
+    },
+    "10 с" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "10 s"
+          }
+        }
+      }
+    },
+    "30 с" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "30 s"
+          }
+        }
+      }
+    },
+    "iOS сама решает, когда дать приложению фоновое время. Для круглосуточной работы нужна VPN-сборка, а в локальном режиме — геопозиция «Всегда»." : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS decides when to grant background time. For round-the-clock operation use the VPN build, or allow location \"Always\" in local mode."
+          }
+        }
+      }
     }
   },
   "version" : "1.0"

@@ -26,6 +26,7 @@
 		100000000000000000000139 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000023A /* NotificationManager.swift */; };
 		10000000000000000000013D /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 10000000000000000000023E /* Localizable.xcstrings */; };
 		10000000000000000000013F /* BackgroundKeeper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000240 /* BackgroundKeeper.swift */; };
+		100000000000000000000141 /* ProxyHealth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000241 /* ProxyHealth.swift */; };
 		200000000000000000000101 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000201 /* PacketTunnelProvider.swift */; };
 		200000000000000000000102 /* NativeProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000202 /* NativeProxy.swift */; };
 		200000000000000000000103 /* ProxyConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000203 /* ProxyConfiguration.swift */; };
@@ -52,6 +53,7 @@
 		10000000000000000000023A /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Proxy/NotificationManager.swift; sourceTree = "<group>"; };
 		10000000000000000000023E /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		100000000000000000000240 /* BackgroundKeeper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Proxy/BackgroundKeeper.swift; sourceTree = "<group>"; };
+		100000000000000000000241 /* ProxyHealth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Proxy/ProxyHealth.swift; sourceTree = "<group>"; };
 		200000000000000000000200 /* PacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = PacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		200000000000000000000201 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
 		200000000000000000000202 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -122,6 +124,7 @@
 				10000000000000000000023A /* NotificationManager.swift */,
 				10000000000000000000023E /* Localizable.xcstrings */,
 				100000000000000000000240 /* BackgroundKeeper.swift */,
+				100000000000000000000241 /* ProxyHealth.swift */,
 				100000000000000000000205 /* GlassTheme.swift */,
 				100000000000000000000204 /* ProxyViewModel.swift */,
 				100000000000000000000230 /* ProxyEngine.swift */,
@@ -348,6 +351,7 @@
 				100000000000000000000138 /* LogsView.swift in Sources */,
 				100000000000000000000139 /* NotificationManager.swift in Sources */,
 				10000000000000000000013F /* BackgroundKeeper.swift in Sources */,
+				100000000000000000000141 /* ProxyHealth.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -372,7 +376,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 210;
 				DEVELOPMENT_TEAM = 8Y5QD6A49C;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -387,7 +391,7 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)/rust",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.0.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ltgwsproxy",
@@ -420,7 +424,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 210;
 				DEVELOPMENT_TEAM = 8Y5QD6A49C;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -434,7 +438,7 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)/rust",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.0.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ltgwsproxy",
@@ -565,7 +569,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = ios/PacketTunnel/PacketTunnel.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 210;
 				DEVELOPMENT_TEAM = 8Y5QD6A49C;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -580,7 +584,7 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)/rust",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.0.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ltgwsproxy",
@@ -610,7 +614,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = ios/PacketTunnel/PacketTunnel.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 210;
 				DEVELOPMENT_TEAM = 8Y5QD6A49C;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -625,7 +629,7 @@
 					"$(inherited)",
 					"$(BUILT_PRODUCTS_DIR)/rust",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.0.10;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ltgwsproxy",
